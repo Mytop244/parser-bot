@@ -6,8 +6,11 @@ import asyncio
 import sys
 import json
 from pathlib import Path
+from dotenv import load_dotenv  # NEW
 
-# 🔧 Загружаем переменные окружения
+# Загружаем переменные из .env
+load_dotenv()
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
@@ -16,9 +19,7 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# 📂 Файл для хранения уже отправленных ссылок
 DATA_FILE = Path("sent_links.json")
-
 if DATA_FILE.exists():
     try:
         sent_links = set(json.loads(DATA_FILE.read_text(encoding="utf-8")))
@@ -28,7 +29,6 @@ else:
     sent_links = set()
 
 def save_links():
-    """Сохраняем отправленные ссылки в JSON"""
     DATA_FILE.write_text(json.dumps(list(sent_links), ensure_ascii=False, indent=2), encoding="utf-8")
 
 async def fetch_news():
@@ -55,7 +55,7 @@ async def send_news():
 
     for title, link in news[:5]:
         if link in sent_links:
-            continue  # уже отправляли
+            continue
         try:
             await bot.send_message(chat_id=CHAT_ID, text=f"{title}\n{link}")
             sent_links.add(link)
