@@ -5,37 +5,53 @@ import os
 import asyncio
 import sys
 import json
-from pathlib import Path
-from dotenv import load_dotenv  # NEW
+from dotenv import load_dotenv
 
-# Загружаем переменные из .env
+# -------------------------------
+# 🔧 Загружаем настройки из .env
+# -------------------------------
 load_dotenv()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+RSS_URL = os.environ.get("RSS_URL", "https://www.wired.com/feed/rss")
+NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
+INTERVAL = int(os.environ.get("INTERVAL", 600))
+SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ Ошибка: TELEGRAM_TOKEN или CHAT_ID не заданы")
 
+try:
+    CHAT_ID = int(CHAT_ID)
+except Exception:
+    pass
+
 bot = Bot(token=TELEGRAM_TOKEN)
 
-DATA_FILE = Path("sent_links.json")
-if DATA_FILE.exists():
+# -------------------------------
+# 📂 Локальное хранилище отправленных ссылок
+# -------------------------------
+if os.path.exists(SENT_LINKS_FILE):
     try:
-        sent_links = set(json.loads(DATA_FILE.read_text(encoding="utf-8")))
-    except json.JSONDecodeError:
+        with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
+            sent_links = set(json.load(f))
+    except Exception:
         sent_links = set()
 else:
     sent_links = set()
 
 def save_links():
-    DATA_FILE.write_text(json.dumps(list(sent_links), ensure_ascii=False, indent=2), encoding="utf-8")
+    with open(SENT_LINKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(sent_links), f, ensure_ascii=False, indent=2)
 
+# -------------------------------
+# 🌐 Получение новостей
+# -------------------------------
 async def fetch_news():
-    url = "https://www.wired.com/feed/rss"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+            async with session.get(RSS_URL) as resp:
                 if resp.status != 200:
                     print(f"❌ Ошибка загрузки RSS: {resp.status}")
                     return []
@@ -47,13 +63,16 @@ async def fetch_news():
     soup = BeautifulSoup(text, "lxml-xml")
     return [(i.title.text, i.link.text) for i in soup.find_all("item")]
 
+# -------------------------------
+# 📩 Отправка новостей
+# -------------------------------
 async def send_news():
     news = await fetch_news()
     if not news:
         print("⚠️ Нет новостей")
         return
 
-    for title, link in news[:5]:
+    for title, link in news[:NEWS_LIMIT]:
         if link in sent_links:
             continue
         try:
@@ -62,14 +81,17 @@ async def send_news():
             save_links()
             print(f"✅ Отправлено: {title}")
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
+# -------------------------------
+# 🔄 Цикл воркера
+# -------------------------------
 async def main():
     while True:
         await send_news()
-        print("⏳ Жду 10 минут...")
-        await asyncio.sleep(600)
+        print(f"⏳ Жду {INTERVAL // 60} минут...")
+        await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
     asyncio.run(main())

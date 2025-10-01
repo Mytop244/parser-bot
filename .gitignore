@@ -1,3 +1,12 @@
 # Секреты и локальные файлы
 .env
 sent_links.json
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Виртуальное окружение
+.venv/
