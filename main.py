@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 # -------------------------------
 # 🔧 Логирование с ежедневной ротацией
 # -------------------------------
+
+os.makedirs("log", exist_ok=True)
+
 log_formatter = logging.Formatter(
     "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
 )
