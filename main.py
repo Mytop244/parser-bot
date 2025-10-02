@@ -5,7 +5,39 @@ import os
 import asyncio
 import sys
 import json
+import logging
+from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime
 from dotenv import load_dotenv
+
+# -------------------------------
+# 🔧 Логирование с ежедневной ротацией
+# -------------------------------
+log_formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
+)
+
+# текущий файл будет называться parser-YYYY-MM-DD.log
+log_filename = datetime.now().strftime("parser-%Y-%m-%d.log")
+
+file_handler = TimedRotatingFileHandler(
+    log_filename,
+    when="midnight",     # новая ротация каждый день
+    interval=1,
+    backupCount=7,       # храним 7 дней
+    encoding="utf-8",
+    utc=False
+)
+file_handler.suffix = "%Y-%m-%d.log"
+file_handler.setFormatter(log_formatter)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[file_handler, console_handler]
+)
 
 # -------------------------------
 # 🔧 Загружаем настройки из .env
@@ -53,11 +85,11 @@ async def fetch_news():
         async with aiohttp.ClientSession() as session:
             async with session.get(RSS_URL) as resp:
                 if resp.status != 200:
-                    print(f"❌ Ошибка загрузки RSS: {resp.status}")
+                    logging.error(f"Ошибка загрузки RSS: {resp.status}")
                     return []
                 text = await resp.text()
     except Exception as e:
-        print(f"❌ Сетевая ошибка: {e}")
+        logging.error(f"Сетевая ошибка: {e}")
         return []
 
     soup = BeautifulSoup(text, "lxml-xml")
@@ -69,7 +101,7 @@ async def fetch_news():
 async def send_news():
     news = await fetch_news()
     if not news:
-        print("⚠️ Нет новостей")
+        logging.warning("Нет новостей")
         return
 
     for title, link in news[:NEWS_LIMIT]:
@@ -79,9 +111,9 @@ async def send_news():
             await bot.send_message(chat_id=CHAT_ID, text=f"{title}\n{link}")
             sent_links.add(link)
             save_links()
-            print(f"✅ Отправлено: {title}")
+            logging.info(f"Отправлено: {title}")
         except Exception as e:
-            print(f"❌ Ошибка отправки: {e}")
+            logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
 # -------------------------------
@@ -89,8 +121,9 @@ async def send_news():
 # -------------------------------
 async def main():
     while True:
+        logging.info("Начало проверки новостей")
         await send_news()
-        print(f"⏳ Жду {INTERVAL // 60} минут...")
+        logging.info(f"Следующая проверка через {INTERVAL // 60} мин")
         await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
