@@ -18,7 +18,7 @@ log_formatter = logging.Formatter(
 )
 
 # текущий файл будет называться parser-YYYY-MM-DD.log
-log_filename = datetime.now().strftime("parser-%Y-%m-%d.log")
+log_filename = datetime.now().strftime("log/parser-%Y-%m-%d.log")
 
 file_handler = TimedRotatingFileHandler(
     log_filename,
