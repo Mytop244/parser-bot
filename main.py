@@ -7,8 +7,9 @@ import sys
 import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from email.utils import parsedate_to_datetime
 
 # -------------------------------
 # 🔧 Логирование с ежедневной ротацией
@@ -38,7 +39,7 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-RSS_URLS = os.environ.get("RSS_URLS", "https://www.wired.com/feed/rss,https://www.reuters.com/rssFeed/worldNews").split(",")
+RSS_URLS = os.environ.get("RSS_URLS", "").split(",")
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
@@ -85,7 +86,38 @@ async def fetch_news(url):
         return []
 
     soup = BeautifulSoup(text, "lxml-xml")
-    return [(i.title.text, i.link.text, url) for i in soup.find_all("item")]
+
+    news_list = []
+    for i in soup.find_all("item"):
+        title = i.title.text if i.title else "Без заголовка"
+        link = i.link.text if i.link else ""
+        pub_date = None
+        if i.pubDate:
+            try:
+                pub_date = parsedate_to_datetime(i.pubDate.text)
+            except Exception:
+                pass
+        news_list.append((title, link, url, pub_date))
+
+    return news_list
+
+# -------------------------------
+# ✅ Проверка источников
+# -------------------------------
+async def check_sources():
+    logging.info("🔍 Ежедневная проверка источников...")
+    for url in RSS_URLS:
+        if not url.strip():
+            continue
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url.strip()) as resp:
+                    if resp.status == 200:
+                        logging.info(f"✅ Источник доступен: {url}")
+                    else:
+                        logging.warning(f"⚠️ Источник {url} вернул статус {resp.status}")
+        except Exception as e:
+            logging.error(f"❌ Источник {url} недоступен: {e}")
 
 # -------------------------------
 # 📩 Отправка новостей
@@ -93,30 +125,51 @@ async def fetch_news(url):
 async def send_news():
     all_news = []
     for url in RSS_URLS:
-        news = await fetch_news(url.strip())
-        all_news.extend(news)
+        if url.strip():
+            news = await fetch_news(url.strip())
+            all_news.extend(news)
 
     if not all_news:
         logging.warning("Нет новостей")
         return
 
-    for title, link, source in all_news[:NEWS_LIMIT]:
+    logging.info(f"Найдено всего {len(all_news)} новостей")
+
+    # сортировка по дате (сначала новые)
+    all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
+
+    sent_count = 0
+    for title, link, source, pub_date in all_news[:NEWS_LIMIT]:
         if link in sent_links:
             continue
         try:
-            await bot.send_message(chat_id=CHAT_ID, text=f"📌 {title}\n{link}\n🌍 {source}")
+            date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"📰 {title}\n{link}\n📅 {date_str}\n🌍 {source}"
+            )
             sent_links.add(link)
             save_links()
+            sent_count += 1
             logging.info(f"Отправлено: {title}")
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
+    logging.info(f"Отправлено новых новостей: {sent_count} из {NEWS_LIMIT}")
+
 # -------------------------------
 # 🔄 Цикл воркера
 # -------------------------------
 async def main():
+    last_check = datetime.min
     while True:
+        now = datetime.now()
+        # раз в сутки проверка источников
+        if (now - last_check) > timedelta(days=1):
+            await check_sources()
+            last_check = now
+
         logging.info("Начало проверки новостей")
         await send_news()
         logging.info(f"Следующая проверка через {INTERVAL // 60} мин")
