@@ -7,7 +7,7 @@ import sys
 import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
 import time
@@ -106,7 +106,14 @@ async def fetch_news(url):
         pub_date = None
         if i.pubDate:
             try:
-                pub_date = parsedate_to_datetime(i.pubDate.text)
+                dt = parsedate_to_datetime(i.pubDate.text)
+                if dt is not None:
+                    # Приводим дату к UTC и делаем её offset-naive (без tzinfo)
+                    if dt.tzinfo is None:
+                        # Если нет tz, считаем дату в UTC
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    pub_date = dt
             except Exception:
                 pass
         news_list.append((title, link, url, pub_date))
