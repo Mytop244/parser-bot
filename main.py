@@ -13,31 +13,13 @@ from email.utils import parsedate_to_datetime
 import time
 
 # -------------------------------
-# 🔧 Логирование с ежедневной ротацией
-# -------------------------------
-os.makedirs("log", exist_ok=True)
-
-log_formatter = logging.Formatter(
-    "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
-)
-log_formatter.converter = time.localtime  # локальное время
-log_filename = datetime.now().strftime("log/parser-%Y-%m-%d.log")
-
-file_handler = TimedRotatingFileHandler(
-    log_filename, when="midnight", interval=1, backupCount=7, encoding="utf-8"
-)
-file_handler.suffix = "%Y-%m-%d.log"
-file_handler.setFormatter(log_formatter)
-
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(log_formatter)
-
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
-
-# -------------------------------
 # 🔧 Загружаем настройки из .env
 # -------------------------------
 load_dotenv()
+
+TIMEZONE = os.environ.get("TIMEZONE", "UTC")
+os.environ['TZ'] = TIMEZONE
+time.tzset()  # применяем TZ
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -55,6 +37,34 @@ except Exception:
     pass
 
 bot = Bot(token=TELEGRAM_TOKEN)
+
+# -------------------------------
+# 🔧 Логирование с ежедневной ротацией
+# -------------------------------
+os.makedirs("log", exist_ok=True)
+
+log_formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
+)
+log_formatter.converter = time.localtime  # локальное время
+
+log_filename = datetime.now().strftime("log/parser-%Y-%m-%d.log")
+
+file_handler = TimedRotatingFileHandler(
+    log_filename,
+    when="midnight",
+    interval=1,
+    backupCount=7,
+    encoding="utf-8",
+    utc=False
+)
+file_handler.suffix = "%Y-%m-%d.log"
+file_handler.setFormatter(log_formatter)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 
 # -------------------------------
 # 📂 Локальное хранилище отправленных ссылок
@@ -135,7 +145,6 @@ async def send_news():
         logging.warning("Нет новостей")
         return
 
-    # лог найденных новостей с источниками
     logging.info(f"Найдено всего {len(all_news)} новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}")
 
     # сортировка по дате (сначала новые)
@@ -154,7 +163,6 @@ async def send_news():
             sent_links.add(link)
             save_links()
             sent_count += 1
-            # логируем отправку конкретной новости с источником
             logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
