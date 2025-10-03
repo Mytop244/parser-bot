@@ -10,6 +10,7 @@ from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
+import time
 
 # -------------------------------
 # 🔧 Логирование с ежедневной ротацией
@@ -19,6 +20,7 @@ os.makedirs("log", exist_ok=True)
 log_formatter = logging.Formatter(
     "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
 )
+log_formatter.converter = time.localtime  # локальное время
 log_filename = datetime.now().strftime("log/parser-%Y-%m-%d.log")
 
 file_handler = TimedRotatingFileHandler(
