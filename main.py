@@ -135,7 +135,8 @@ async def send_news():
         logging.warning("Нет новостей")
         return
 
-    logging.info(f"Найдено всего {len(all_news)} новостей")
+    # лог найденных новостей с источниками
+    logging.info(f"Найдено всего {len(all_news)} новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}")
 
     # сортировка по дате (сначала новые)
     all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
@@ -153,14 +154,13 @@ async def send_news():
             sent_links.add(link)
             save_links()
             sent_count += 1
-            logging.info(f"Найдено всего {len(all_news)} новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}")
-
+            # логируем отправку конкретной новости с источником
+            logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
-    logging.info(f"Отправлено: {title} | Источник: {source}")
-
+    logging.info(f"Всего отправлено новостей: {sent_count} из {NEWS_LIMIT}")
 
 # -------------------------------
 # 🔄 Цикл воркера
