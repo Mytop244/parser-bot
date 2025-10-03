@@ -153,7 +153,7 @@ async def send_news():
             sent_links.add(link)
             save_links()
             sent_count += 1
-            logging.info(f"Отправлено: {title}")
+            logging.info(f"Отправлено: {title} | Источник: {source}")
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
