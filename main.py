@@ -196,10 +196,7 @@ async def send_news():
     for j, (title, link, source, pub_date) in enumerate(new_items[:limit]):
         try:
             date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"📰 {title}\n{link}\n📅 {date_str}\n🌍 {source}"
-            )
+            await bot.send_message(chat_id=CHAT_ID, text=link)
             sent_data[link] = date_str
             sent_count += 1
             logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
