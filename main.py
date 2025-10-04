@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
 from collections import defaultdict, deque
 import time
+import math
 
 # -------------------------------
 # 🔧 Загружаем настройки из .env
@@ -30,6 +31,7 @@ INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
+MAX_CHUNK = 4500  # максимальный размер текста для одного сообщения AI Studio / Telegram
 
 AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
 if not AI_STUDIO_KEY:
@@ -100,26 +102,49 @@ async def fetch_news(url):
     return news_list
 
 # -------------------------------
-# 🤖 Получение текста статьи через AI Studio
+# 🤖 Получение текста статьи через AI Studio с разбиением
 # -------------------------------
 async def fetch_article_ai(link: str) -> str:
-    prompt = f"Прочти статью по ссылке и кратко перескажи её содержание:\n{link}"
-    url = "https://aistudio.google.com/api-keys/generate"
-
-    headers = {"Authorization": f"Bearer {AI_STUDIO_KEY}"}
-    payload = {"prompt": prompt, "max_tokens": 3500}
-
+    # Скачиваем HTML страницы
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
+            async with session.get(link, timeout=30) as resp:
                 if resp.status != 200:
-                    logging.error(f"AI Studio вернул статус {resp.status} для {link}")
                     return ""
-                data = await resp.json()
-                return data.get("text", "").strip()
-    except Exception as e:
-        logging.error(f"Ошибка AI Studio: {e}")
+                html = await resp.text()
+    except Exception:
         return ""
+
+    # Парсим текст
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n", strip=True)
+    if not text:
+        return ""
+
+    # Разбиваем текст на части
+    chunks = [text[i:i + MAX_CHUNK] for i in range(0, len(text), MAX_CHUNK)]
+    summarized_parts = []
+
+    url_api = "https://aistudio.google.com/api-keys/generate"
+    headers = {"Authorization": f"Bearer {AI_STUDIO_KEY}"}
+
+    for idx, chunk in enumerate(chunks, 1):
+        payload = {"prompt": f"Сделай краткое изложение на русском языке:\n{chunk}", "max_tokens": 2000}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url_api, json=payload, headers=headers) as resp:
+                    if resp.status != 200:
+                        logging.error(f"AI Studio вернул статус {resp.status} для {link}")
+                        continue
+                    data = await resp.json()
+                    summarized = data.get("text", "").strip()
+                    if summarized:
+                        summarized_parts.append(summarized)
+        except Exception as e:
+            logging.error(f"Ошибка AI Studio: {e}")
+        await asyncio.sleep(1)  # чтобы не перегружать API
+
+    return "\n\n".join(summarized_parts)
 
 # -------------------------------
 # ✅ Проверка источников
@@ -198,8 +223,10 @@ async def send_news():
             article_text = await fetch_article_ai(link)
 
             if article_text:
-                msg = f"{title}\n\n{article_text[:3500]}..."
-                await bot.send_message(chat_id=CHAT_ID, text=msg)
+                msg_chunks = [article_text[i:i+4000] for i in range(0, len(article_text), 4000)]
+                for chunk in msg_chunks:
+                    await bot.send_message(chat_id=CHAT_ID, text=f"{title}\n\n{chunk}")
+                    await asyncio.sleep(1)
             else:
                 await bot.send_message(chat_id=CHAT_ID, text=link)
 
