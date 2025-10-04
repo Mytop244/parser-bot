@@ -27,6 +27,7 @@ RSS_URLS = os.environ.get("RSS_URLS", "").split(",")
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
+DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))  # по умолчанию 1 день
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ Ошибка: TELEGRAM_TOKEN или CHAT_ID не заданы")
@@ -152,17 +153,24 @@ async def send_news():
         logging.warning("Нет новостей")
         return
 
-    logging.info(f"Найдено всего {len(all_news)} новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}")
+    # фильтр по давности
+    cutoff_date = datetime.utcnow() - timedelta(days=DAYS_LIMIT)
+    all_news = [n for n in all_news if n[3] and n[3] >= cutoff_date]
+
+    if not all_news:
+        logging.info(f"Нет новостей за последние {DAYS_LIMIT} дн.")
+        return
+
+    logging.info(f"Найдено {len(all_news)} свежих новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}")
 
     # сортировка по дате (сначала новые)
     all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
 
-    sent_count = 0
+    # только новые, которых не было
     new_items = [n for n in all_news if n[1] not in sent_links]
-    for title, link, source, pub_date in new_items[:NEWS_LIMIT]:
 
-        if link in sent_links:
-            continue
+    sent_count = 0
+    for title, link, source, pub_date in new_items[:NEWS_LIMIT]:
         try:
             date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
             await bot.send_message(
@@ -177,7 +185,7 @@ async def send_news():
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
-    logging.info(f"Всего отправлено новостей: {sent_count} из {NEWS_LIMIT}")
+    logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (ограничение {NEWS_LIMIT})")
 
 # -------------------------------
 # 🔄 Цикл воркера
