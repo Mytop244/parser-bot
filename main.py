@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
 import time
+from collections import defaultdict, deque
 
 # -------------------------------
 # 🔧 Загружаем настройки из .env
@@ -28,6 +29,7 @@ NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))  # по умолчанию 1 день
+ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))  # 0 = обычный режим, 1 = по кругу
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ Ошибка: TELEGRAM_TOKEN или CHAT_ID не заданы")
@@ -47,7 +49,7 @@ os.makedirs("log", exist_ok=True)
 log_formatter = logging.Formatter(
     "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
 )
-log_formatter.converter = time.localtime  # локальное время
+log_formatter.converter = time.localtime
 
 log_filename = datetime.now().strftime("log/parser-%Y-%m-%d.log")
 
@@ -66,22 +68,6 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
-
-# -------------------------------
-# 📂 Локальное хранилище отправленных ссылок
-# -------------------------------
-if os.path.exists(SENT_LINKS_FILE):
-    try:
-        with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
-            sent_links = set(json.load(f))
-    except Exception:
-        sent_links = set()
-else:
-    sent_links = set()
-
-def save_links():
-    with open(SENT_LINKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(sent_links), f, ensure_ascii=False, indent=2)
 
 # -------------------------------
 # 🌐 Получение новостей
@@ -109,9 +95,7 @@ async def fetch_news(url):
             try:
                 dt = parsedate_to_datetime(i.pubDate.text)
                 if dt is not None:
-                    # Приводим дату к UTC и делаем её offset-naive (без tzinfo)
                     if dt.tzinfo is None:
-                        # Если нет tz, считаем дату в UTC
                         dt = dt.replace(tzinfo=timezone.utc)
                     dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
                     pub_date = dt
@@ -153,62 +137,84 @@ async def send_news():
         logging.warning("Нет новостей")
         return
 
-    # 🔹 фильтр по дате публикации
-    cutoff_date = datetime.utcnow() - timedelta(days=DAYS_LIMIT)
+    cutoff_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=DAYS_LIMIT)
     all_news = [n for n in all_news if n[3] and n[3] >= cutoff_date]
 
     if not all_news:
         logging.info(f"Нет новостей за последние {DAYS_LIMIT} дн.")
         return
 
-    logging.info(
-        f"Найдено {len(all_news)} свежих новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}"
-    )
-
-    # 🔹 сортировка по дате (новые первыми)
-    all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
-
-    # 🔹 очищаем старые ссылки
+    # -----------------------------
+    # 📌 Читаем историю отправок
+    # -----------------------------
     try:
-        # читаем старые ссылки с датами
         with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
-            sent_data = json.load(f)
-        if isinstance(sent_data, dict):
-            # старый формат {link: "YYYY-MM-DD HH:MM"}
-            sent_data = {
-                link: date_str for link, date_str in sent_data.items()
-                if datetime.strptime(date_str, "%Y-%m-%d %H:%M") >= cutoff_date
-            }
-        else:
-            # старый формат — просто список ссылок, оставляем пустым
-            sent_data = {}
+            data = json.load(f)
+        sent_data = data.get("links", {}) if isinstance(data, dict) else {}
+        last_index = data.get("last_source_index", 0) if isinstance(data, dict) else 0
+        sent_data = {link: date_str for link, date_str in sent_data.items()
+                     if datetime.strptime(date_str, "%Y-%m-%d %H:%M") >= cutoff_date}
     except Exception:
         sent_data = {}
+        last_index = 0
 
-    # 🔹 только новые (не в sent_data)
     new_items = []
-    for title, link, source, pub_date in all_news:
-        if link not in sent_data:
-            new_items.append((title, link, source, pub_date))
-            sent_data[link] = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
 
+    if ROUND_ROBIN_MODE == 1:
+        # -----------------------------
+        # 🔄 Round-robin режим
+        # -----------------------------
+        sources = defaultdict(deque)
+        for title, link, source, pub_date in sorted(all_news, key=lambda x: x[3] or datetime.min, reverse=True):
+            sources[source].append((title, link, source, pub_date))
+
+        source_list = list(sources.keys())
+
+        rr_queue = []
+        i = last_index
+        while any(sources.values()):
+            src = source_list[i % len(source_list)]
+            if sources[src]:
+                rr_queue.append(sources[src].popleft())
+            i += 1
+
+        new_items = [item for item in rr_queue if item[1] not in sent_data]
+
+    else:
+        # -----------------------------
+        # 📅 Обычный режим (по дате)
+        # -----------------------------
+        all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
+        new_items = [item for item in all_news if item[1] not in sent_data]
+
+    # -----------------------------
+    # 📤 Отправка
+    # -----------------------------
     sent_count = 0
-    for title, link, source, pub_date in new_items[:NEWS_LIMIT]:
+    limit = len(new_items) if NEWS_LIMIT == 0 else min(len(new_items), NEWS_LIMIT)
+
+    for j, (title, link, source, pub_date) in enumerate(new_items[:limit]):
         try:
             date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=f"📰 {title}\n{link}\n📅 {date_str}\n🌍 {source}"
             )
+            sent_data[link] = date_str
             sent_count += 1
             logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
-    # 🔹 сохраняем очищенные и обновлённые ссылки
+    # сохраняем историю
+    save_data = {"links": sent_data}
+    if ROUND_ROBIN_MODE == 1 and 'source_list' in locals() and source_list:
+        new_last_index = (last_index + sent_count) % len(source_list)
+        save_data["last_source_index"] = new_last_index
+
     with open(SENT_LINKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sent_data, f, ensure_ascii=False, indent=2)
+        json.dump(save_data, f, ensure_ascii=False, indent=2)
 
     logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (ограничение {NEWS_LIMIT})")
 
@@ -219,7 +225,6 @@ async def main():
     last_check = datetime.min
     while True:
         now = datetime.now()
-        # раз в сутки проверка источников
         if (now - last_check) > timedelta(days=1):
             await check_sources()
             last_check = now
