@@ -10,9 +10,8 @@ from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
-import time
 from collections import defaultdict, deque
-from playwright.async_api import async_playwright   # 🔥 Playwright
+import time
 
 # -------------------------------
 # 🔧 Загружаем настройки из .env
@@ -21,7 +20,7 @@ load_dotenv()
 
 TIMEZONE = os.environ.get("TIMEZONE", "UTC")
 os.environ['TZ'] = TIMEZONE
-time.tzset()  # применяем TZ
+time.tzset()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -29,9 +28,12 @@ RSS_URLS = os.environ.get("RSS_URLS", "").split(",")
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
-DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))  # по умолчанию 1 день
-ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))  # 0 = обычный режим, 1 = по кругу
-BROWSER = os.environ.get("BROWSER", "chromium").lower()  # ⚡ выбор браузера
+DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
+ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
+
+AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
+if not AI_STUDIO_KEY:
+    sys.exit("❌ Ошибка: AI_STUDIO_KEY не задан")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ Ошибка: TELEGRAM_TOKEN или CHAT_ID не заданы")
@@ -44,24 +46,16 @@ except Exception:
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # -------------------------------
-# 🔧 Логирование с ежедневной ротацией
+# 🔧 Логирование с ротацией
 # -------------------------------
 os.makedirs("log", exist_ok=True)
-
 log_formatter = logging.Formatter(
     "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
 )
 log_formatter.converter = time.localtime
 
-log_filename = datetime.now().strftime("log/parser-%Y-%m-%d.log")
-
 file_handler = TimedRotatingFileHandler(
-    log_filename,
-    when="midnight",
-    interval=1,
-    backupCount=7,
-    encoding="utf-8",
-    utc=False
+    "log/parser.log", when="midnight", interval=1, backupCount=7, encoding="utf-8"
 )
 file_handler.suffix = "%Y-%m-%d.log"
 file_handler.setFormatter(log_formatter)
@@ -87,8 +81,8 @@ async def fetch_news(url):
         return []
 
     soup = BeautifulSoup(text, "lxml-xml")
-
     news_list = []
+
     for i in soup.find_all("item"):
         title = i.title.text if i.title else "Без заголовка"
         link = i.link.text if i.link else ""
@@ -96,42 +90,35 @@ async def fetch_news(url):
         if i.pubDate:
             try:
                 dt = parsedate_to_datetime(i.pubDate.text)
-                if dt is not None:
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-                    pub_date = dt
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                pub_date = dt
             except Exception:
                 pass
         news_list.append((title, link, url, pub_date))
-
     return news_list
 
 # -------------------------------
-# 📰 Загрузка статьи через Playwright
+# 🤖 Получение текста статьи через AI Studio
 # -------------------------------
-async def fetch_article(link: str) -> str:
+async def fetch_article_ai(link: str) -> str:
+    prompt = f"Прочти статью по ссылке и кратко перескажи её содержание:\n{link}"
+    url = "https://aistudio.google.com/api-keys/generate"
+
+    headers = {"Authorization": f"Bearer {AI_STUDIO_KEY}"}
+    payload = {"prompt": prompt, "max_tokens": 3500}
+
     try:
-        async with async_playwright() as p:
-            if BROWSER == "firefox":
-                browser = await p.firefox.launch(headless=True)
-            elif BROWSER == "webkit":
-                browser = await p.webkit.launch(headless=True)
-            else:
-                browser = await p.chromium.launch(headless=True)
-
-            page = await browser.new_page()
-            await page.goto(link, timeout=60000)
-
-            try:
-                content = await page.inner_text("article")     # основной вариант
-            except:
-                content = await page.inner_text("body")        # fallback
-
-            await browser.close()
-            return content.strip()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    logging.error(f"AI Studio вернул статус {resp.status} для {link}")
+                    return ""
+                data = await resp.json()
+                return data.get("text", "").strip()
     except Exception as e:
-        logging.error(f"Playwright ошибка: {e}")
+        logging.error(f"Ошибка AI Studio: {e}")
         return ""
 
 # -------------------------------
@@ -173,7 +160,7 @@ async def send_news():
         logging.info(f"Нет новостей за последние {DAYS_LIMIT} дн.")
         return
 
-    # читаем историю
+    # История отправленных ссылок
     try:
         with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -202,14 +189,13 @@ async def send_news():
         all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
         new_items = [item for item in all_news if item[1] not in sent_data]
 
-    # отправка
     sent_count = 0
     limit = len(new_items) if NEWS_LIMIT == 0 else min(len(new_items), NEWS_LIMIT)
 
     for j, (title, link, source, pub_date) in enumerate(new_items[:limit]):
         try:
             date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
-            article_text = await fetch_article(link)
+            article_text = await fetch_article_ai(link)
 
             if article_text:
                 msg = f"{title}\n\n{article_text[:3500]}..."
@@ -235,7 +221,7 @@ async def send_news():
     logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (лимит {NEWS_LIMIT})")
 
 # -------------------------------
-# 🔄 Цикл воркера
+# 🔄 Основной цикл
 # -------------------------------
 async def main():
     last_check = datetime.min
