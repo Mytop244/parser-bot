@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
 import time
 from collections import defaultdict, deque
+from playwright.async_api import async_playwright   # 🔥 Playwright
 
 # -------------------------------
 # 🔧 Загружаем настройки из .env
@@ -30,6 +31,7 @@ INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))  # по умолчанию 1 день
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))  # 0 = обычный режим, 1 = по кругу
+BROWSER = os.environ.get("BROWSER", "chromium").lower()  # ⚡ выбор браузера
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ Ошибка: TELEGRAM_TOKEN или CHAT_ID не заданы")
@@ -70,7 +72,7 @@ console_handler.setFormatter(log_formatter)
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 
 # -------------------------------
-# 🌐 Получение новостей
+# 🌐 Получение новостей (RSS)
 # -------------------------------
 async def fetch_news(url):
     try:
@@ -104,6 +106,33 @@ async def fetch_news(url):
         news_list.append((title, link, url, pub_date))
 
     return news_list
+
+# -------------------------------
+# 📰 Загрузка статьи через Playwright
+# -------------------------------
+async def fetch_article(link: str) -> str:
+    try:
+        async with async_playwright() as p:
+            if BROWSER == "firefox":
+                browser = await p.firefox.launch(headless=True)
+            elif BROWSER == "webkit":
+                browser = await p.webkit.launch(headless=True)
+            else:
+                browser = await p.chromium.launch(headless=True)
+
+            page = await browser.new_page()
+            await page.goto(link, timeout=60000)
+
+            try:
+                content = await page.inner_text("article")     # основной вариант
+            except:
+                content = await page.inner_text("body")        # fallback
+
+            await browser.close()
+            return content.strip()
+    except Exception as e:
+        logging.error(f"Playwright ошибка: {e}")
+        return ""
 
 # -------------------------------
 # ✅ Проверка источников
@@ -144,9 +173,7 @@ async def send_news():
         logging.info(f"Нет новостей за последние {DAYS_LIMIT} дн.")
         return
 
-    # -----------------------------
-    # 📌 Читаем историю отправок
-    # -----------------------------
+    # читаем историю
     try:
         with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -158,18 +185,11 @@ async def send_news():
         sent_data = {}
         last_index = 0
 
-    new_items = []
-
     if ROUND_ROBIN_MODE == 1:
-        # -----------------------------
-        # 🔄 Round-robin режим
-        # -----------------------------
         sources = defaultdict(deque)
         for title, link, source, pub_date in sorted(all_news, key=lambda x: x[3] or datetime.min, reverse=True):
             sources[source].append((title, link, source, pub_date))
-
         source_list = list(sources.keys())
-
         rr_queue = []
         i = last_index
         while any(sources.values()):
@@ -177,26 +197,26 @@ async def send_news():
             if sources[src]:
                 rr_queue.append(sources[src].popleft())
             i += 1
-
         new_items = [item for item in rr_queue if item[1] not in sent_data]
-
     else:
-        # -----------------------------
-        # 📅 Обычный режим (по дате)
-        # -----------------------------
         all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
         new_items = [item for item in all_news if item[1] not in sent_data]
 
-    # -----------------------------
-    # 📤 Отправка
-    # -----------------------------
+    # отправка
     sent_count = 0
     limit = len(new_items) if NEWS_LIMIT == 0 else min(len(new_items), NEWS_LIMIT)
 
     for j, (title, link, source, pub_date) in enumerate(new_items[:limit]):
         try:
             date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
-            await bot.send_message(chat_id=CHAT_ID, text=link)
+            article_text = await fetch_article(link)
+
+            if article_text:
+                msg = f"{title}\n\n{article_text[:3500]}..."
+                await bot.send_message(chat_id=CHAT_ID, text=msg)
+            else:
+                await bot.send_message(chat_id=CHAT_ID, text=link)
+
             sent_data[link] = date_str
             sent_count += 1
             logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
@@ -204,7 +224,6 @@ async def send_news():
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
 
-    # сохраняем историю
     save_data = {"links": sent_data}
     if ROUND_ROBIN_MODE == 1 and 'source_list' in locals() and source_list:
         new_last_index = (last_index + sent_count) % len(source_list)
@@ -213,7 +232,7 @@ async def send_news():
     with open(SENT_LINKS_FILE, "w", encoding="utf-8") as f:
         json.dump(save_data, f, ensure_ascii=False, indent=2)
 
-    logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (ограничение {NEWS_LIMIT})")
+    logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (лимит {NEWS_LIMIT})")
 
 # -------------------------------
 # 🔄 Цикл воркера
