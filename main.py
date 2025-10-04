@@ -153,7 +153,7 @@ async def send_news():
         logging.warning("Нет новостей")
         return
 
-    # фильтр по давности
+    # 🔹 фильтр по дате публикации
     cutoff_date = datetime.utcnow() - timedelta(days=DAYS_LIMIT)
     all_news = [n for n in all_news if n[3] and n[3] >= cutoff_date]
 
@@ -161,13 +161,36 @@ async def send_news():
         logging.info(f"Нет новостей за последние {DAYS_LIMIT} дн.")
         return
 
-    logging.info(f"Найдено {len(all_news)} свежих новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}")
+    logging.info(
+        f"Найдено {len(all_news)} свежих новостей | Источники: {', '.join(set(url for _, _, url, _ in all_news))}"
+    )
 
-    # сортировка по дате (сначала новые)
+    # 🔹 сортировка по дате (новые первыми)
     all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
 
-    # только новые, которых не было
-    new_items = [n for n in all_news if n[1] not in sent_links]
+    # 🔹 очищаем старые ссылки
+    try:
+        # читаем старые ссылки с датами
+        with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
+            sent_data = json.load(f)
+        if isinstance(sent_data, dict):
+            # старый формат {link: "YYYY-MM-DD HH:MM"}
+            sent_data = {
+                link: date_str for link, date_str in sent_data.items()
+                if datetime.strptime(date_str, "%Y-%m-%d %H:%M") >= cutoff_date
+            }
+        else:
+            # старый формат — просто список ссылок, оставляем пустым
+            sent_data = {}
+    except Exception:
+        sent_data = {}
+
+    # 🔹 только новые (не в sent_data)
+    new_items = []
+    for title, link, source, pub_date in all_news:
+        if link not in sent_data:
+            new_items.append((title, link, source, pub_date))
+            sent_data[link] = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
 
     sent_count = 0
     for title, link, source, pub_date in new_items[:NEWS_LIMIT]:
@@ -177,13 +200,15 @@ async def send_news():
                 chat_id=CHAT_ID,
                 text=f"📰 {title}\n{link}\n📅 {date_str}\n🌍 {source}"
             )
-            sent_links.add(link)
-            save_links()
             sent_count += 1
             logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
         await asyncio.sleep(1)
+
+    # 🔹 сохраняем очищенные и обновлённые ссылки
+    with open(SENT_LINKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sent_data, f, ensure_ascii=False, indent=2)
 
     logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (ограничение {NEWS_LIMIT})")
 
