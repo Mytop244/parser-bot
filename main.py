@@ -158,7 +158,9 @@ async def send_news():
     all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
 
     sent_count = 0
-    for title, link, source, pub_date in all_news[:NEWS_LIMIT]:
+    new_items = [n for n in all_news if n[1] not in sent_links]
+    for title, link, source, pub_date in new_items[:NEWS_LIMIT]:
+
         if link in sent_links:
             continue
         try:
