@@ -20,8 +20,11 @@ import math
 load_dotenv()
 
 TIMEZONE = os.environ.get("TIMEZONE", "UTC")
-os.environ['TZ'] = TIMEZONE
-time.tzset()
+os.environ["TZ"] = TIMEZONE
+
+# tzset работает только на Unix/Linux, в Windows его нет
+if hasattr(time, "tzset"):
+    time.tzset()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
