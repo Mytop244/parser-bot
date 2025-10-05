@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
+import subprocess
 
 # ---------------- ENV ----------------
 load_dotenv()
@@ -98,8 +99,8 @@ def clean_text(text: str) -> str:
 # ---------------- Gemini Summary ----------------
 async def summarize(text, max_tokens=200):
     if not AI_STUDIO_KEY:
-        logging.warning("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
-        return text[:400] + "..."
+        logging.warning("⚠️ AI_STUDIO_KEY не задан, используем локальную Ollama")
+        return await summarize_ollama(text)
 
     text = clean_text(text)
     sentence_count = 2
@@ -112,13 +113,8 @@ async def summarize(text, max_tokens=200):
         logging.warning(f"⚠️ Fallback Gemini ({reason})")
         if resp_data:
             logging.warning(f"    Ответ сервера: {resp_data}")
-        # Можно отправить уведомление в Telegram, если ключ исчерпан
-        if "QUOTA_EXCEEDED" in reason or "429" in reason:
-            try:
-                await bot.send_message(chat_id=CHAT_ID, text=f"❌ Gemini: ключ исчерпал токены на сегодня ({reason})")
-            except Exception as e:
-                logging.error(f"❌ Не удалось отправить уведомление в Telegram: {e}")
-        return short_text[:400] + "..."
+        logging.info("⚠️ Используем локальную Ollama для резюме")
+        return await summarize_ollama(text)
 
     while sentence_count <= 6:
         payload = {
@@ -170,6 +166,26 @@ async def summarize(text, max_tokens=200):
             return await fallback(f"неожиданная ошибка: {e}")
 
     return await fallback("не удалось получить резюме после нескольких попыток")
+
+# ---------------- Локальная Ollama ----------------
+async def summarize_ollama(text):
+    """
+    Использует локальную модель Ollama для генерации резюме.
+    Требуется: ollama CLI и модель установлена.
+    """
+    try:
+        prompt = f"Сделай краткое резюме новости:\n{text}"
+        result = subprocess.run(
+            ["ollama", "generate", "ggml-model", prompt],
+            capture_output=True, text=True, check=True
+        )
+        summary = result.stdout.strip()
+        logging.info(f"✅ Ollama сгенерировала резюме: {summary[:100]}...")
+        return summary
+    except Exception as e:
+        logging.error(f"❌ Ошибка Ollama: {e}")
+        return text[:400] + "..."
+
 
 # ---------------- Check Sources ----------------
 async def check_sources():
