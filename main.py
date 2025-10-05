@@ -25,6 +25,7 @@ ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
 AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
 AI_PROJECT_ID = os.environ.get("AI_PROJECT_ID")
 GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 
 # Батчи
 BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
@@ -34,6 +35,7 @@ PAUSE_MEDIUM = int(os.environ.get("PAUSE_MEDIUM", 5))
 BATCH_SIZE_LARGE = int(os.environ.get("BATCH_SIZE_LARGE", 25))
 PAUSE_LARGE = int(os.environ.get("PAUSE_LARGE", 10))
 SINGLE_MESSAGE_PAUSE = int(os.environ.get("SINGLE_MESSAGE_PAUSE", 1))
+
 
 if not TELEGRAM_TOKEN or not CHAT_ID: 
     sys.exit("❌ TELEGRAM_TOKEN или CHAT_ID не заданы")
