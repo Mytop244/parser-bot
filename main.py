@@ -11,9 +11,6 @@ load_dotenv()
 if hasattr(time, "tzset"):
     os.environ["TZ"] = os.environ.get("TIMEZONE", "UTC")
     time.tzset()
-else:
-    logging.info("⏰ Windows: пропускаем установку TZ (tzset недоступен)")
-
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = int(os.environ.get("CHAT_ID", 0))
@@ -24,7 +21,6 @@ SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
 AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
-AI_PROJECT_ID = os.environ.get("AI_PROJECT_ID")  # <-- добавь это
 GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 
 # Батчи
@@ -36,19 +32,33 @@ BATCH_SIZE_LARGE = int(os.environ.get("BATCH_SIZE_LARGE", 25))
 PAUSE_LARGE = int(os.environ.get("PAUSE_LARGE", 10))
 SINGLE_MESSAGE_PAUSE = int(os.environ.get("SINGLE_MESSAGE_PAUSE", 1))
 
-if not TELEGRAM_TOKEN or not CHAT_ID: 
+if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ TELEGRAM_TOKEN или CHAT_ID не заданы")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ---------------- LOG ----------------
+# ---------------- LOG + COLOR PRINT ----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),                  # консоль
-        logging.FileHandler("parser.log", encoding="utf-8") # файл
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
+
+RESET  = "\033[0m"
+RED    = "\033[91m"
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+
+def log_info(msg):
+    print(f"{GREEN}{msg}{RESET}", flush=True)
+    logging.info(msg)
+
+def log_warn(msg):
+    print(f"{YELLOW}{msg}{RESET}", flush=True)
+    logging.warning(msg)
+
+def log_error(msg):
+    print(f"{RED}{msg}{RESET}", flush=True)
+    logging.error(msg)
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
@@ -69,16 +79,17 @@ async def fetch_and_check(url, head_only=False):
                     pub=None
                     if hasattr(e,'published_parsed') and e.published_parsed:
                         pub=datetime.fromtimestamp(datetime(*e.published_parsed[:6]).timestamp(), tz=timezone.utc)
-                    news.append((e.get("title","Без заголовка").strip(), e.get("link","").strip(),
-                                 feed.feed.get("title","Неизвестный источник").strip(), pub))
+                    news.append((e.get("title","Без заголовка").strip(),
+                                 e.get("link","").strip(),
+                                 feed.feed.get("title","Неизвестный источник").strip(),
+                                 pub))
                 return news
         except Exception as e:
             return (url, f"❌ {e.__class__.__name__}") if head_only else []
 
-# ---------------- TEXT CLEANER ----------------
 def clean_text(text: str) -> str:
     try:
-        if "<" in text and ">" in text:  # похоже на HTML
+        if "<" in text and ">" in text:
             text = BeautifulSoup(text, "html.parser").get_text()
     except Exception:
         pass
@@ -87,28 +98,19 @@ def clean_text(text: str) -> str:
 # ---------------- Gemini Summary ----------------
 async def summarize(text, max_tokens=200):
     if not AI_STUDIO_KEY:
-        logging.info("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
+        log_warn("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
         return text[:400] + "..."
-
     text = clean_text(text)
     short_text = ". ".join(text.split(".")[:3])
-
+    log_info(f"🤖 Gemini: готовлю резюме для текста: {short_text[:60]}...")
     payload = {
-        "contents": [
-            {"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}
-        ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": max_tokens
-        }
+        "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
     }
-
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
-    logging.info(f"🤖 Gemini ({GEMINI_MODEL}): отправка запроса: {short_text[:60]}...")
 
-    # fallback-функция
     def fallback(reason):
-        logging.warning(f"⚠️ Fallback Gemini ({reason}), используем урезанный текст")
+        log_warn(f"⚠️ Fallback Gemini ({reason}), используем урезанный текст")
         return short_text[:400] + "..."
 
     try:
@@ -118,42 +120,38 @@ async def summarize(text, max_tokens=200):
                 if resp.status != 200:
                     return fallback(f"HTTP {resp.status}")
                 result = await resp.json()
-                text_out = (
-                    result.get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text")
-                )
+                text_out = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text")
                 if not text_out:
                     return fallback("пустой ответ")
-                logging.info(f"✅ Получено резюме: {text_out[:100]}...")
+                log_info(f"✅ Получено резюме: {text_out[:100]}...")
                 return text_out
-    except asyncio.TimeoutError:
-        return fallback("таймаут")
-    except aiohttp.ClientError as e:
-        return fallback(f"сетевой сбой: {e}")
     except Exception as e:
         return fallback(f"ошибка: {e}")
 
-# ---------------- Other helpers ----------------
+# ---------------- Check Sources ----------------
 async def check_sources():
     results = await asyncio.gather(*[fetch_and_check(url, head_only=True) for url in RSS_URLS])
-    logging.info("🔍 Проверка источников:")
-    for u,s in results: logging.info(f"  {s} — {u}")
+    log_info("🔍 Проверка источников:")
+    for u,s in results:
+        log_info(f"  {s} — {u}")
 
+# ---------------- Send News ----------------
 async def send_news():
     all_news=[]
+    log_info("📥 Сбор новостей...")
     if os.path.exists("news_queue.json"):
-        try:
-            with open("news_queue.json","r",encoding="utf-8") as f:
-                queued=json.load(f)
-            all_news.extend([(t,l,s,datetime.fromisoformat(p)) for t,l,s,p in queued])
-            os.remove("news_queue.json")
-        except: pass
+        with open("news_queue.json","r",encoding="utf-8") as f:
+            queued=json.load(f)
+        all_news.extend([(t,l,s,datetime.fromisoformat(p)) for t,l,s,p in queued])
+        os.remove("news_queue.json")
 
     results = await asyncio.gather(*[fetch_and_check(url) for url in RSS_URLS])
     for r in results: all_news.extend(r)
-    if not all_news: return
+    log_info(f"📰 Получено {len(all_news)} новостей")
+
+    if not all_news:
+        log_info("💤 Новостей нет, жду следующий цикл")
+        return
 
     cutoff=datetime.now(timezone.utc)-timedelta(days=DAYS_LIMIT)
     all_news=[n for n in all_news if n[3] and n[3]>=cutoff]
@@ -194,10 +192,10 @@ async def send_news():
                 await bot.send_message(chat_id=CHAT_ID,text=text,parse_mode="HTML")
                 sent_links[l]=local_time
                 sent_count+=1
-                logging.info(f"📤 Новость отправлена в Telegram: {t[:50]}...")
+                log_info(f"✅ Новость отправлена: {t[:50]}...")
                 break
             except Exception as e: 
-                logging.error(f"❌ Ошибка отправки: {e}")
+                log_error(f"❌ Ошибка отправки: {e}")
                 await asyncio.sleep(5)
         await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
@@ -210,7 +208,7 @@ async def send_news():
     tmp=SENT_LINKS_FILE+".tmp"
     with open(tmp,"w",encoding="utf-8") as f: json.dump(save,f,ensure_ascii=False,indent=2)
     os.replace(tmp,SENT_LINKS_FILE)
-    logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей, пауза перед следующим батчем {pause} сек")
+    log_info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей, пауза перед следующим батчем {pause} сек")
     await asyncio.sleep(pause)
 
 # ---------------- MAIN LOOP ----------------
@@ -221,12 +219,12 @@ async def main():
         if (now-last_check)>timedelta(days=1):
             await check_sources()
             last_check=now
-        logging.info("🔄 Проверка новостей...")
+        log_info("🔄 Проверка новостей...")
         await send_news()
-        logging.info(f"⏰ Следующая проверка через {INTERVAL//60} мин\n")
+        log_info(f"⏰ Следующая проверка через {INTERVAL//60} мин\n")
         print("💤 цикл завершён, жду следующий", flush=True)
         await asyncio.sleep(5)
 
 if __name__=="__main__":
-    logging.info("🚀 Запуск бота...")
+    log_info("🚀 Запуск бота...")
     asyncio.run(main())
