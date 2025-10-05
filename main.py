@@ -73,56 +73,69 @@ async def fetch_and_check(url, head_only=False):
             return (url, f"❌ {e.__class__.__name__}") if head_only else []
 
 # ---------------- Gemini Summary ----------------
-async def summarize(text, max_tokens=200):
+MAX_CHUNK = 2000   # безопасная длина фрагмента
+MAX_RETRIES = 2    # сколько раз пытаться, если пусто
+
+async def summarize(text: str, max_tokens=200) -> str:
     if not AI_STUDIO_KEY:
         logging.info("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
         return text[:400] + "..."
 
-    text = BeautifulSoup(text, "html.parser").get_text()
-    text = " ".join(text.split())
-    short_text = ". ".join(text.split(".")[:3])
+    # Чистим HTML и убираем пробелы
+    soup = BeautifulSoup(text, "html.parser")
+    clean_text = soup.get_text(" ", strip=True)
 
-    payload = {
-        "contents": [
-            {"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}
-        ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": max_tokens
-        }
-    }
+    if not clean_text or len(clean_text) < 100:
+        logging.warning("⚠️ Слишком мало текста, возвращаем как есть")
+        return clean_text
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
-    logging.info(f"🤖 Gemini ({GEMINI_MODEL}): отправка запроса: {short_text[:60]}...")
+    # Дробим на части
+    chunks = [clean_text[i:i+MAX_CHUNK] for i in range(0, len(clean_text), MAX_CHUNK)]
+    summarized_parts = []
 
-    # fallback-функция
-    def fallback(reason):
-        logging.warning(f"⚠️ Fallback Gemini ({reason}), используем урезанный текст")
-        return short_text[:400] + "..."
+    for idx, chunk in enumerate(chunks):
+        summary = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "contents": [
+                        {"parts": [{"text": f"Сделай краткое резюме новости на русском:\n\n{chunk}"}]}
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.2,
+                        "maxOutputTokens": max_tokens
+                    }
+                }
 
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    return fallback(f"HTTP {resp.status}")
-                result = await resp.json()
-                text_out = (
-                    result.get("candidates", [{}])[0]
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status != 200:
+                            logging.warning(f"⚠️ Gemini HTTP {resp.status}, часть {idx+1}")
+                            continue
+                        data = await resp.json()
+
+                summary = (
+                    data.get("candidates", [{}])[0]
                     .get("content", {})
                     .get("parts", [{}])[0]
                     .get("text")
                 )
-                if not text_out:
-                    return fallback("пустой ответ")
-                logging.info(f"✅ Получено резюме: {text_out[:100]}...")
-                return text_out
-    except asyncio.TimeoutError:
-        return fallback("таймаут")
-    except aiohttp.ClientError as e:
-        return fallback(f"сетевой сбой: {e}")
-    except Exception as e:
-        return fallback(f"ошибка: {e}")
+
+                if summary:
+                    logging.info(f"✅ Gemini резюме (часть {idx+1}): {summary[:80]}...")
+                    break
+            except Exception as e:
+                logging.error(f"❌ Ошибка Gemini (часть {idx+1}, попытка {attempt+1}): {e}")
+
+        if not summary:
+            logging.warning(f"⚠️ Fallback Gemini (пусто), часть {idx+1}")
+            summary = chunk[:400] + "..." if len(chunk) > 400 else chunk
+
+        summarized_parts.append(summary.strip())
+
+    return "\n\n".join(summarized_parts)
 
 # ---------------- Other helpers ----------------
 async def check_sources():
