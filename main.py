@@ -226,7 +226,8 @@ async def main():
         logging.info("🔄 Проверка новостей...")
         await send_news()
         logging.info(f"⏰ Следующая проверка через {INTERVAL//60} мин\n")
-        await asyncio.sleep(INTERVAL)
+        print("💤 цикл завершён, жду следующий", flush=True)
+        await asyncio.sleep(5)
 
 if __name__=="__main__":
     logging.info("🚀 Запуск бота...")
