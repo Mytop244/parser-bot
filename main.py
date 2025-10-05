@@ -98,35 +98,71 @@ def clean_text(text: str) -> str:
 # ---------------- Gemini Summary ----------------
 async def summarize(text, max_tokens=200):
     if not AI_STUDIO_KEY:
-        log_warn("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
+        logging.warning("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
         return text[:400] + "..."
+
     text = clean_text(text)
-    short_text = ". ".join(text.split(".")[:3])
-    log_info(f"🤖 Gemini: готовлю резюме для текста: {short_text[:60]}...")
-    payload = {
-        "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
-    }
+    # Начинаем с первых 2 предложений
+    sentence_count = 2
+    short_text = ". ".join(text.split(".")[:sentence_count])
+    logging.info(f"🤖 Gemini: готовлю резюме для текста: {short_text[:60]}...")
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
 
-    def fallback(reason):
-        log_warn(f"⚠️ Fallback Gemini ({reason}), используем урезанный текст")
+    async def fallback(reason, resp_data=None):
+        logging.warning(f"⚠️ Fallback Gemini ({reason})")
+        if resp_data:
+            logging.warning(f"    Ответ сервера: {resp_data}")
         return short_text[:400] + "..."
 
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    return fallback(f"HTTP {resp.status}")
-                result = await resp.json()
-                text_out = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text")
-                if not text_out:
-                    return fallback("пустой ответ")
-                log_info(f"✅ Получено резюме: {text_out[:100]}...")
-                return text_out
-    except Exception as e:
-        return fallback(f"ошибка: {e}")
+    while sentence_count <= 6:  # пробуем увеличить количество предложений до 6
+        payload = {
+            "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as resp:
+                    try:
+                        result = await resp.json()
+                    except Exception as e:
+                        return await fallback(f"не удалось распарсить JSON: {e}", await resp.text())
+
+                    if resp.status != 200:
+                        return await fallback(f"HTTP {resp.status}", result)
+
+                    candidates = result.get("candidates")
+                    if not candidates or not isinstance(candidates, list):
+                        return await fallback("нет candidates в ответе", result)
+
+                    text_out = (
+                        candidates[0]
+                        .get("content", {})
+                        .get("parts", [{}])[0]
+                        .get("text")
+                    )
+
+                    finish_reason = candidates[0].get("finishReason")
+                    if not text_out or finish_reason == "MAX_TOKENS":
+                        logging.info(f"⚠️ Gemini вернул MAX_TOKENS или пустой текст, пробуем меньше предложений")
+                        sentence_count -= 1 if sentence_count > 1 else 0
+                        short_text = ". ".join(text.split(".")[:sentence_count])
+                        max_tokens = max(50, max_tokens - 50)  # уменьшаем токены
+                        continue
+
+                    logging.info(f"✅ Получено резюме: {text_out[:100]}...")
+                    return text_out
+
+        except asyncio.TimeoutError:
+            return await fallback("таймаут запроса")
+        except aiohttp.ClientError as e:
+            return await fallback(f"сетевой сбой: {e}")
+        except Exception as e:
+            return await fallback(f"неожиданная ошибка: {e}")
+
+    return await fallback("не удалось получить резюме после нескольких попыток")
 
 # ---------------- Check Sources ----------------
 async def check_sources():
