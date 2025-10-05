@@ -85,7 +85,7 @@ def clean_text(text: str) -> str:
 # ---------------- Ollama local fallback ----------------
 async def summarize_ollama(text):
     short_text = ". ".join(text.split(".")[:3])
-    cmd = ['ollama', 'generate', 'ggml-model', f'Сделай краткое резюме новости:\n{short_text}']
+    cmd = ['ollama', 'generate', 'gpt-oss:latest', f'Сделай краткое резюме новости:\n{short_text}']
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
