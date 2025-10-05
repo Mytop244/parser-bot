@@ -102,7 +102,6 @@ async def summarize(text, max_tokens=200):
         return text[:400] + "..."
 
     text = clean_text(text)
-    # Начинаем с первых 2 предложений
     sentence_count = 2
     short_text = ". ".join(text.split(".")[:sentence_count])
     logging.info(f"🤖 Gemini: готовлю резюме для текста: {short_text[:60]}...")
@@ -113,9 +112,15 @@ async def summarize(text, max_tokens=200):
         logging.warning(f"⚠️ Fallback Gemini ({reason})")
         if resp_data:
             logging.warning(f"    Ответ сервера: {resp_data}")
+        # Можно отправить уведомление в Telegram, если ключ исчерпан
+        if "QUOTA_EXCEEDED" in reason or "429" in reason:
+            try:
+                await bot.send_message(chat_id=CHAT_ID, text=f"❌ Gemini: ключ исчерпал токены на сегодня ({reason})")
+            except Exception as e:
+                logging.error(f"❌ Не удалось отправить уведомление в Telegram: {e}")
         return short_text[:400] + "..."
 
-    while sentence_count <= 6:  # пробуем увеличить количество предложений до 6
+    while sentence_count <= 6:
         payload = {
             "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
@@ -130,6 +135,8 @@ async def summarize(text, max_tokens=200):
                     except Exception as e:
                         return await fallback(f"не удалось распарсить JSON: {e}", await resp.text())
 
+                    if resp.status == 429:
+                        return await fallback("HTTP 429 TooManyRequests (квота исчерпана)", result)
                     if resp.status != 200:
                         return await fallback(f"HTTP {resp.status}", result)
 
@@ -143,13 +150,13 @@ async def summarize(text, max_tokens=200):
                         .get("parts", [{}])[0]
                         .get("text")
                     )
-
                     finish_reason = candidates[0].get("finishReason")
-                    if not text_out or finish_reason == "MAX_TOKENS":
-                        logging.info(f"⚠️ Gemini вернул MAX_TOKENS или пустой текст, пробуем меньше предложений")
-                        sentence_count -= 1 if sentence_count > 1 else 0
+
+                    if not text_out or finish_reason in ["MAX_TOKENS", "QUOTA_EXCEEDED"]:
+                        logging.info(f"⚠️ Gemini вернул {finish_reason or 'пустой текст'}, уменьшаем предложение/токены")
+                        sentence_count = max(1, sentence_count - 1)
                         short_text = ". ".join(text.split(".")[:sentence_count])
-                        max_tokens = max(50, max_tokens - 50)  # уменьшаем токены
+                        max_tokens = max(50, max_tokens - 50)
                         continue
 
                     logging.info(f"✅ Получено резюме: {text_out[:100]}...")
