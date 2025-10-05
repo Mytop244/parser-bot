@@ -1,270 +1,220 @@
-import aiohttp
-from bs4 import BeautifulSoup
-from telegram import Bot
-import os
-import asyncio
-import sys
-import json
-import logging
-from logging.handlers import TimedRotatingFileHandler
+import os, sys, json, time, asyncio, ssl, logging
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-from email.utils import parsedate_to_datetime
 from collections import defaultdict, deque
-import time
-import math
+from dotenv import load_dotenv
+import aiohttp, feedparser
+from telegram import Bot
+from bs4 import BeautifulSoup
 
-# -------------------------------
-# 🔧 Загружаем настройки из .env
-# -------------------------------
+# ---------------- ENV ----------------
 load_dotenv()
-
-TIMEZONE = os.environ.get("TIMEZONE", "UTC")
-os.environ["TZ"] = TIMEZONE
-
-# tzset работает только на Unix/Linux, в Windows его нет
 if hasattr(time, "tzset"):
+    os.environ["TZ"] = os.environ.get("TIMEZONE", "UTC")
     time.tzset()
+else:
+    logging.info("⏰ Windows: пропускаем установку TZ (tzset недоступен)")
+
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-RSS_URLS = os.environ.get("RSS_URLS", "").split(",")
+CHAT_ID = int(os.environ.get("CHAT_ID", 0))
+RSS_URLS = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
-MAX_CHUNK = 4500  # максимальный размер текста для одного сообщения AI Studio / Telegram
-
 AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
-if not AI_STUDIO_KEY:
-    sys.exit("❌ Ошибка: AI_STUDIO_KEY не задан")
+AI_PROJECT_ID = os.environ.get("AI_PROJECT_ID")  # <-- добавь это
+GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    sys.exit("❌ Ошибка: TELEGRAM_TOKEN или CHAT_ID не заданы")
+# Батчи
+BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
+PAUSE_SMALL = int(os.environ.get("PAUSE_SMALL", 3))
+BATCH_SIZE_MEDIUM = int(os.environ.get("BATCH_SIZE_MEDIUM", 15))
+PAUSE_MEDIUM = int(os.environ.get("PAUSE_MEDIUM", 5))
+BATCH_SIZE_LARGE = int(os.environ.get("BATCH_SIZE_LARGE", 25))
+PAUSE_LARGE = int(os.environ.get("PAUSE_LARGE", 10))
+SINGLE_MESSAGE_PAUSE = int(os.environ.get("SINGLE_MESSAGE_PAUSE", 1))
 
-try:
-    CHAT_ID = int(CHAT_ID)
-except Exception:
-    pass
-
+if not TELEGRAM_TOKEN or not CHAT_ID: 
+    sys.exit("❌ TELEGRAM_TOKEN или CHAT_ID не заданы")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# -------------------------------
-# 🔧 Логирование с ротацией
-# -------------------------------
-os.makedirs("log", exist_ok=True)
-log_formatter = logging.Formatter(
-    "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
+# ---------------- LOG ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("parser.log", encoding="utf-8")]
 )
-log_formatter.converter = time.localtime
 
-file_handler = TimedRotatingFileHandler(
-    "log/parser.log", when="midnight", interval=1, backupCount=7, encoding="utf-8"
-)
-file_handler.suffix = "%Y-%m-%d.log"
-file_handler.setFormatter(log_formatter)
+ssl_ctx = ssl.create_default_context()
+ssl_ctx.check_hostname = False
+ssl_ctx.verify_mode = ssl.CERT_NONE
 
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(log_formatter)
+# ---------------- HELPERS ----------------
+async def fetch_and_check(url, head_only=False):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+        try:
+            if head_only:
+                async with s.head(url, ssl=ssl_ctx) as r:
+                    return url, "✅ OK" if r.status == 200 else f"⚠️ HTTP {r.status}"
+            async with s.get(url, ssl=ssl_ctx) as r:
+                if r.status != 200: raise Exception(f"HTTP {r.status}")
+                feed = feedparser.parse(await r.read())
+                news=[]
+                for e in feed.entries:
+                    pub=None
+                    if hasattr(e,'published_parsed') and e.published_parsed:
+                        pub=datetime.fromtimestamp(datetime(*e.published_parsed[:6]).timestamp(), tz=timezone.utc)
+                    news.append((e.get("title","Без заголовка").strip(), e.get("link","").strip(),
+                                 feed.feed.get("title","Неизвестный источник").strip(), pub))
+                return news
+        except Exception as e:
+            return (url, f"❌ {e.__class__.__name__}") if head_only else []
 
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+# ---------------- Gemini Summary ----------------
+async def summarize(text, max_tokens=200):
+    if not AI_STUDIO_KEY:
+        logging.info("⚠️ AI_STUDIO_KEY не задан, используем урезанный текст")
+        return text[:400] + "..."
 
-# -------------------------------
-# 🌐 Получение новостей (RSS)
-# -------------------------------
-async def fetch_news(url):
+    text = BeautifulSoup(text, "html.parser").get_text()
+    text = " ".join(text.split())
+    short_text = ". ".join(text.split(".")[:3])
+
+    payload = {
+        "contents": [
+            {"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": max_tokens
+        }
+    }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
+    logging.info(f"🤖 Gemini ({GEMINI_MODEL}): отправка запроса: {short_text[:60]}...")
+
+    # fallback-функция
+    def fallback(reason):
+        logging.warning(f"⚠️ Fallback Gemini ({reason}), используем урезанный текст")
+        return short_text[:400] + "..."
+
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logging.error(f"Ошибка загрузки {url}: {resp.status}")
-                    return []
-                text = await resp.text()
+                    return fallback(f"HTTP {resp.status}")
+                result = await resp.json()
+                text_out = (
+                    result.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text")
+                )
+                if not text_out:
+                    return fallback("пустой ответ")
+                logging.info(f"✅ Получено резюме: {text_out[:100]}...")
+                return text_out
+    except asyncio.TimeoutError:
+        return fallback("таймаут")
+    except aiohttp.ClientError as e:
+        return fallback(f"сетевой сбой: {e}")
     except Exception as e:
-        logging.error(f"Сетевая ошибка {url}: {e}")
-        return []
+        return fallback(f"ошибка: {e}")
 
-    soup = BeautifulSoup(text, "lxml-xml")
-    news_list = []
-
-    for i in soup.find_all("item"):
-        title = i.title.text if i.title else "Без заголовка"
-        link = i.link.text if i.link else ""
-        pub_date = None
-        if i.pubDate:
-            try:
-                dt = parsedate_to_datetime(i.pubDate.text)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-                pub_date = dt
-            except Exception:
-                pass
-        news_list.append((title, link, url, pub_date))
-    return news_list
-
-# -------------------------------
-# 🤖 Получение текста статьи через AI Studio с разбиением
-# -------------------------------
-async def fetch_article_ai(link: str) -> str:
-    # Скачиваем HTML страницы
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(link, timeout=30) as resp:
-                if resp.status != 200:
-                    return ""
-                html = await resp.text()
-    except Exception:
-        return ""
-
-    # Парсим текст
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(separator="\n", strip=True)
-    if not text:
-        return ""
-
-    # Разбиваем текст на части
-    chunks = [text[i:i + MAX_CHUNK] for i in range(0, len(text), MAX_CHUNK)]
-    summarized_parts = []
-
-    url_api = "https://aistudio.google.com/api-keys/generate"
-    headers = {"Authorization": f"Bearer {AI_STUDIO_KEY}"}
-
-    for idx, chunk in enumerate(chunks, 1):
-        payload = {"prompt": f"Сделай краткое изложение на русском языке:\n{chunk}", "max_tokens": 2000}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url_api, json=payload, headers=headers) as resp:
-                    if resp.status != 200:
-                        logging.error(f"AI Studio вернул статус {resp.status} для {link}")
-                        continue
-                    data = await resp.json()
-                    summarized = data.get("text", "").strip()
-                    if summarized:
-                        summarized_parts.append(summarized)
-        except Exception as e:
-            logging.error(f"Ошибка AI Studio: {e}")
-        await asyncio.sleep(1)  # чтобы не перегружать API
-
-    return "\n\n".join(summarized_parts)
-
-# -------------------------------
-# ✅ Проверка источников
-# -------------------------------
+# ---------------- Other helpers ----------------
 async def check_sources():
-    logging.info("🔍 Ежедневная проверка источников...")
-    for url in RSS_URLS:
-        if not url.strip():
-            continue
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url.strip()) as resp:
-                    if resp.status == 200:
-                        logging.info(f"✅ Источник доступен: {url}")
-                    else:
-                        logging.warning(f"⚠️ Источник {url} вернул статус {resp.status}")
-        except Exception as e:
-            logging.error(f"❌ Источник {url} недоступен: {e}")
+    results = await asyncio.gather(*[fetch_and_check(url, head_only=True) for url in RSS_URLS])
+    logging.info("🔍 Проверка источников:")
+    for u,s in results: logging.info(f"  {s} — {u}")
 
-# -------------------------------
-# 📩 Отправка новостей
-# -------------------------------
 async def send_news():
-    all_news = []
-    for url in RSS_URLS:
-        if url.strip():
-            news = await fetch_news(url.strip())
-            all_news.extend(news)
-
-    if not all_news:
-        logging.warning("Нет новостей")
-        return
-
-    cutoff_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=DAYS_LIMIT)
-    all_news = [n for n in all_news if n[3] and n[3] >= cutoff_date]
-
-    if not all_news:
-        logging.info(f"Нет новостей за последние {DAYS_LIMIT} дн.")
-        return
-
-    # История отправленных ссылок
-    try:
-        with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        sent_data = data.get("links", {}) if isinstance(data, dict) else {}
-        last_index = data.get("last_source_index", 0) if isinstance(data, dict) else 0
-        sent_data = {link: date_str for link, date_str in sent_data.items()
-                     if datetime.strptime(date_str, "%Y-%m-%d %H:%M") >= cutoff_date}
-    except Exception:
-        sent_data = {}
-        last_index = 0
-
-    if ROUND_ROBIN_MODE == 1:
-        sources = defaultdict(deque)
-        for title, link, source, pub_date in sorted(all_news, key=lambda x: x[3] or datetime.min, reverse=True):
-            sources[source].append((title, link, source, pub_date))
-        source_list = list(sources.keys())
-        rr_queue = []
-        i = last_index
-        while any(sources.values()):
-            src = source_list[i % len(source_list)]
-            if sources[src]:
-                rr_queue.append(sources[src].popleft())
-            i += 1
-        new_items = [item for item in rr_queue if item[1] not in sent_data]
-    else:
-        all_news.sort(key=lambda x: x[3] or datetime.min, reverse=True)
-        new_items = [item for item in all_news if item[1] not in sent_data]
-
-    sent_count = 0
-    limit = len(new_items) if NEWS_LIMIT == 0 else min(len(new_items), NEWS_LIMIT)
-
-    for j, (title, link, source, pub_date) in enumerate(new_items[:limit]):
+    all_news=[]
+    if os.path.exists("news_queue.json"):
         try:
-            date_str = pub_date.strftime("%Y-%m-%d %H:%M") if pub_date else "без даты"
-            article_text = await fetch_article_ai(link)
+            with open("news_queue.json","r",encoding="utf-8") as f:
+                queued=json.load(f)
+            all_news.extend([(t,l,s,datetime.fromisoformat(p)) for t,l,s,p in queued])
+            os.remove("news_queue.json")
+        except: pass
 
-            if article_text:
-                msg_chunks = [article_text[i:i+4000] for i in range(0, len(article_text), 4000)]
-                for chunk in msg_chunks:
-                    await bot.send_message(chat_id=CHAT_ID, text=f"{title}\n\n{chunk}")
-                    await asyncio.sleep(1)
-            else:
-                await bot.send_message(chat_id=CHAT_ID, text=link)
+    results = await asyncio.gather(*[fetch_and_check(url) for url in RSS_URLS])
+    for r in results: all_news.extend(r)
+    if not all_news: return
 
-            sent_data[link] = date_str
-            sent_count += 1
-            logging.info(f"Отправлено: {title} | Источник: {source} | Дата: {date_str}")
-        except Exception as e:
-            logging.error(f"Ошибка отправки: {e}")
-        await asyncio.sleep(1)
+    cutoff=datetime.now(timezone.utc)-timedelta(days=DAYS_LIMIT)
+    all_news=[n for n in all_news if n[3] and n[3]>=cutoff]
 
-    save_data = {"links": sent_data}
-    if ROUND_ROBIN_MODE == 1 and 'source_list' in locals() and source_list:
-        new_last_index = (last_index + sent_count) % len(source_list)
-        save_data["last_source_index"] = new_last_index
+    try:
+        with open(SENT_LINKS_FILE,"r",encoding="utf-8") as f: data=json.load(f)
+        sent_links=data.get("links",{}); last_index=data.get("last_source_index",0)
+    except: sent_links,last_index={},0
+    sent_links={k:v for k,v in sent_links.items() if datetime.strptime(v,"%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)>=cutoff}
 
-    with open(SENT_LINKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(save_data, f, ensure_ascii=False, indent=2)
+    if ROUND_ROBIN_MODE:
+        sources=defaultdict(deque)
+        for t,l,s,p in sorted(all_news,key=lambda x:x[3],reverse=True): sources[s].append((t,l,s,p))
+        src_list=list(sources.keys()); queue,i=[],last_index
+        while any(sources.values()):
+            s=src_list[i%len(src_list)]
+            if sources[s]: queue.append(sources[s].popleft())
+            i+=1
+        new_items=[n for n in queue if n[1] not in sent_links]
+    else: new_items=[n for n in sorted(all_news,key=lambda x:x[3],reverse=True) if n[1] not in sent_links]
 
-    logging.info(f"Всего отправлено новостей: {sent_count} из {len(new_items)} (лимит {NEWS_LIMIT})")
+    total = len(new_items)
+    if total <= BATCH_SIZE_SMALL: pause=PAUSE_SMALL
+    elif total <= BATCH_SIZE_MEDIUM: pause=PAUSE_MEDIUM
+    else: pause=PAUSE_LARGE
 
-# -------------------------------
-# 🔄 Основной цикл
-# -------------------------------
+    current_batch = new_items[:NEWS_LIMIT or total]
+    queue_rest = new_items[NEWS_LIMIT or total:]
+
+    sent_count=0
+    for t,l,s,p in current_batch:
+        local_time=(p or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        summary=await summarize(f"{t}\n{l}")
+        text=f"<b>{t}</b>\n📡 {s}\n🗓 {local_time}\n\n{summary}\n🔗 {l}"
+        if len(text)>4000: text=text[:3990]+"..."
+        for _ in range(3):
+            try: 
+                await bot.send_message(chat_id=CHAT_ID,text=text,parse_mode="HTML")
+                sent_links[l]=local_time
+                sent_count+=1
+                logging.info(f"📤 Новость отправлена в Telegram: {t[:50]}...")
+                break
+            except Exception as e: 
+                logging.error(f"❌ Ошибка отправки: {e}")
+                await asyncio.sleep(5)
+        await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
+
+    if queue_rest:
+        with open("news_queue.json","w",encoding="utf-8") as f:
+            json.dump([(t,l,s,p.isoformat()) for t,l,s,p in queue_rest],f,ensure_ascii=False,indent=2)
+
+    save={"links":sent_links}
+    if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list: save["last_source_index"]=(last_index+sent_count)%len(src_list)
+    tmp=SENT_LINKS_FILE+".tmp"
+    with open(tmp,"w",encoding="utf-8") as f: json.dump(save,f,ensure_ascii=False,indent=2)
+    os.replace(tmp,SENT_LINKS_FILE)
+    logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей, пауза перед следующим батчем {pause} сек")
+    await asyncio.sleep(pause)
+
+# ---------------- MAIN LOOP ----------------
 async def main():
-    last_check = datetime.min
+    last_check=datetime.min
     while True:
-        now = datetime.now()
-        if (now - last_check) > timedelta(days=1):
+        now=datetime.now()
+        if (now-last_check)>timedelta(days=1):
             await check_sources()
-            last_check = now
-
-        logging.info("Начало проверки новостей")
+            last_check=now
+        logging.info("🔄 Проверка новостей...")
         await send_news()
-        logging.info(f"Следующая проверка через {INTERVAL // 60} мин")
+        logging.info(f"⏰ Следующая проверка через {INTERVAL//60} мин\n")
         await asyncio.sleep(INTERVAL)
 
-if __name__ == "__main__":
+if __name__=="__main__":
+    logging.info("🚀 Запуск бота...")
     asyncio.run(main())
