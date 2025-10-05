@@ -1,17 +1,18 @@
-import os, sys, json, time, asyncio, ssl, logging
+import os, sys, json, time, asyncio, ssl, logging, subprocess
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
-import subprocess
 
 # ---------------- ENV ----------------
 load_dotenv()
 if hasattr(time, "tzset"):
     os.environ["TZ"] = os.environ.get("TIMEZONE", "UTC")
     time.tzset()
+else:
+    logging.info("⏰ Windows: пропускаем установку TZ (tzset недоступен)")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = int(os.environ.get("CHAT_ID", 0))
@@ -22,6 +23,7 @@ SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
 AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
+AI_PROJECT_ID = os.environ.get("AI_PROJECT_ID")
 GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 
 # Батчи
@@ -33,33 +35,17 @@ BATCH_SIZE_LARGE = int(os.environ.get("BATCH_SIZE_LARGE", 25))
 PAUSE_LARGE = int(os.environ.get("PAUSE_LARGE", 10))
 SINGLE_MESSAGE_PAUSE = int(os.environ.get("SINGLE_MESSAGE_PAUSE", 1))
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
+if not TELEGRAM_TOKEN or not CHAT_ID: 
     sys.exit("❌ TELEGRAM_TOKEN или CHAT_ID не заданы")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ---------------- LOG + COLOR PRINT ----------------
+# ---------------- LOG ----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout),
+              logging.FileHandler("parser.log", encoding="utf-8")]
 )
-
-RESET  = "\033[0m"
-RED    = "\033[91m"
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-
-def log_info(msg):
-    print(f"{GREEN}{msg}{RESET}", flush=True)
-    logging.info(msg)
-
-def log_warn(msg):
-    print(f"{YELLOW}{msg}{RESET}", flush=True)
-    logging.warning(msg)
-
-def log_error(msg):
-    print(f"{RED}{msg}{RESET}", flush=True)
-    logging.error(msg)
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
@@ -80,10 +66,8 @@ async def fetch_and_check(url, head_only=False):
                     pub=None
                     if hasattr(e,'published_parsed') and e.published_parsed:
                         pub=datetime.fromtimestamp(datetime(*e.published_parsed[:6]).timestamp(), tz=timezone.utc)
-                    news.append((e.get("title","Без заголовка").strip(),
-                                 e.get("link","").strip(),
-                                 feed.feed.get("title","Неизвестный источник").strip(),
-                                 pub))
+                    news.append((e.get("title","Без заголовка").strip(), e.get("link","").strip(),
+                                 feed.feed.get("title","Неизвестный источник").strip(), pub))
                 return news
         except Exception as e:
             return (url, f"❌ {e.__class__.__name__}") if head_only else []
@@ -96,121 +80,93 @@ def clean_text(text: str) -> str:
         pass
     return " ".join(text.split())
 
-# ---------------- Gemini Summary ----------------
+# ---------------- Ollama local fallback ----------------
+async def summarize_ollama(text):
+    short_text = ". ".join(text.split(".")[:3])
+    cmd = ['ollama', 'generate', 'ggml-model', f'Сделай краткое резюме новости:\n{short_text}']
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except Exception as e:
+        logging.error(f"❌ Ошибка Ollama: {e}")
+        return short_text[:400] + "..."
+
+# ---------------- Gemini Summary with quota check ----------------
 async def summarize(text, max_tokens=200):
     if not AI_STUDIO_KEY:
-        logging.warning("⚠️ AI_STUDIO_KEY не задан, используем локальную Ollama")
+        logging.warning("⚠️ AI_STUDIO_KEY не задан, использую локальную Ollama")
         return await summarize_ollama(text)
 
     text = clean_text(text)
-    sentence_count = 2
-    short_text = ". ".join(text.split(".")[:sentence_count])
+    short_text = ". ".join(text.split(".")[:2])
     logging.info(f"🤖 Gemini: готовлю резюме для текста: {short_text[:60]}...")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
+    # Проверка квоты
+    try:
+        quota_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:getQuota?key={AI_STUDIO_KEY}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(quota_url) as resp:
+                if resp.status == 200:
+                    quota_data = await resp.json()
+                    remaining = quota_data.get("freeTierRemaining", 0)
+                    logging.info(f"⏱ Gemini квота осталась: {remaining}")
+                    if remaining <= 0:
+                        logging.warning("⚠️ Квота Gemini исчерпана, используем Ollama")
+                        return await summarize_ollama(text)
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка проверки квоты Gemini: {e}")
 
-    async def fallback(reason, resp_data=None):
-        logging.warning(f"⚠️ Fallback Gemini ({reason})")
-        if resp_data:
-            logging.warning(f"    Ответ сервера: {resp_data}")
-        logging.info("⚠️ Используем локальную Ollama для резюме")
+    # Вызов Gemini
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(url, json=payload) as resp:
+                result = await resp.json()
+                if resp.status == 429 or "quotaExceeded" in str(result).lower():
+                    logging.warning("⚠️ Квота Gemini исчерпана, fallback на Ollama")
+                    return await summarize_ollama(text)
+
+                candidates = result.get("candidates")
+                if not candidates or not isinstance(candidates, list):
+                    logging.warning("⚠️ Нет candidates в ответе Gemini, fallback на Ollama")
+                    return await summarize_ollama(text)
+
+                text_out = candidates[0].get("content", {}).get("parts", [{}])[0].get("text")
+                if not text_out:
+                    logging.warning("⚠️ Пустой текст от Gemini, fallback на Ollama")
+                    return await summarize_ollama(text)
+
+                logging.info(f"✅ Получено резюме Gemini: {text_out[:100]}...")
+                return text_out
+
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка Gemini: {e}, fallback на Ollama")
         return await summarize_ollama(text)
 
-    while sentence_count <= 6:
-        payload = {
-            "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
-        }
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload) as resp:
-                    try:
-                        result = await resp.json()
-                    except Exception as e:
-                        return await fallback(f"не удалось распарсить JSON: {e}", await resp.text())
-
-                    if resp.status == 429:
-                        return await fallback("HTTP 429 TooManyRequests (квота исчерпана)", result)
-                    if resp.status != 200:
-                        return await fallback(f"HTTP {resp.status}", result)
-
-                    candidates = result.get("candidates")
-                    if not candidates or not isinstance(candidates, list):
-                        return await fallback("нет candidates в ответе", result)
-
-                    text_out = (
-                        candidates[0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text")
-                    )
-                    finish_reason = candidates[0].get("finishReason")
-
-                    if not text_out or finish_reason in ["MAX_TOKENS", "QUOTA_EXCEEDED"]:
-                        logging.info(f"⚠️ Gemini вернул {finish_reason or 'пустой текст'}, уменьшаем предложение/токены")
-                        sentence_count = max(1, sentence_count - 1)
-                        short_text = ". ".join(text.split(".")[:sentence_count])
-                        max_tokens = max(50, max_tokens - 50)
-                        continue
-
-                    logging.info(f"✅ Получено резюме: {text_out[:100]}...")
-                    return text_out
-
-        except asyncio.TimeoutError:
-            return await fallback("таймаут запроса")
-        except aiohttp.ClientError as e:
-            return await fallback(f"сетевой сбой: {e}")
-        except Exception as e:
-            return await fallback(f"неожиданная ошибка: {e}")
-
-    return await fallback("не удалось получить резюме после нескольких попыток")
-
-# ---------------- Локальная Ollama ----------------
-async def summarize_ollama(text):
-    """
-    Использует локальную модель Ollama для генерации резюме.
-    Требуется: ollama CLI и модель установлена.
-    """
-    try:
-        prompt = f"Сделай краткое резюме новости:\n{text}"
-        result = subprocess.run(
-            ["ollama", "generate", "ggml-model", prompt],
-            capture_output=True, text=True, check=True
-        )
-        summary = result.stdout.strip()
-        logging.info(f"✅ Ollama сгенерировала резюме: {summary[:100]}...")
-        return summary
-    except Exception as e:
-        logging.error(f"❌ Ошибка Ollama: {e}")
-        return text[:400] + "..."
-
-
-# ---------------- Check Sources ----------------
+# ---------------- Other helpers ----------------
 async def check_sources():
     results = await asyncio.gather(*[fetch_and_check(url, head_only=True) for url in RSS_URLS])
-    log_info("🔍 Проверка источников:")
-    for u,s in results:
-        log_info(f"  {s} — {u}")
+    logging.info("🔍 Проверка источников:")
+    for u,s in results: logging.info(f"  {s} — {u}")
 
-# ---------------- Send News ----------------
 async def send_news():
     all_news=[]
-    log_info("📥 Сбор новостей...")
     if os.path.exists("news_queue.json"):
-        with open("news_queue.json","r",encoding="utf-8") as f:
-            queued=json.load(f)
-        all_news.extend([(t,l,s,datetime.fromisoformat(p)) for t,l,s,p in queued])
-        os.remove("news_queue.json")
+        try:
+            with open("news_queue.json","r",encoding="utf-8") as f:
+                queued=json.load(f)
+            all_news.extend([(t,l,s,datetime.fromisoformat(p)) for t,l,s,p in queued])
+            os.remove("news_queue.json")
+        except: pass
 
     results = await asyncio.gather(*[fetch_and_check(url) for url in RSS_URLS])
     for r in results: all_news.extend(r)
-    log_info(f"📰 Получено {len(all_news)} новостей")
-
-    if not all_news:
-        log_info("💤 Новостей нет, жду следующий цикл")
-        return
+    if not all_news: return
 
     cutoff=datetime.now(timezone.utc)-timedelta(days=DAYS_LIMIT)
     all_news=[n for n in all_news if n[3] and n[3]>=cutoff]
@@ -251,10 +207,10 @@ async def send_news():
                 await bot.send_message(chat_id=CHAT_ID,text=text,parse_mode="HTML")
                 sent_links[l]=local_time
                 sent_count+=1
-                log_info(f"✅ Новость отправлена: {t[:50]}...")
+                logging.info(f"📤 Новость отправлена в Telegram: {t[:50]}...")
                 break
             except Exception as e: 
-                log_error(f"❌ Ошибка отправки: {e}")
+                logging.error(f"❌ Ошибка отправки: {e}")
                 await asyncio.sleep(5)
         await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
@@ -267,7 +223,7 @@ async def send_news():
     tmp=SENT_LINKS_FILE+".tmp"
     with open(tmp,"w",encoding="utf-8") as f: json.dump(save,f,ensure_ascii=False,indent=2)
     os.replace(tmp,SENT_LINKS_FILE)
-    log_info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей, пауза перед следующим батчем {pause} сек")
+    logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей, пауза перед следующим батчем {pause} сек")
     await asyncio.sleep(pause)
 
 # ---------------- MAIN LOOP ----------------
@@ -278,12 +234,12 @@ async def main():
         if (now-last_check)>timedelta(days=1):
             await check_sources()
             last_check=now
-        log_info("🔄 Проверка новостей...")
+        logging.info("🔄 Проверка новостей...")
         await send_news()
-        log_info(f"⏰ Следующая проверка через {INTERVAL//60} мин\n")
+        logging.info(f"⏰ Следующая проверка через {INTERVAL//60} мин\n")
         print("💤 цикл завершён, жду следующий", flush=True)
-        await asyncio.sleep(5)
+        await asyncio.sleep(INTERVAL)
 
 if __name__=="__main__":
-    log_info("🚀 Запуск бота...")
+    logging.info("🚀 Запуск бота...")
     asyncio.run(main())
