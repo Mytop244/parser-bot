@@ -81,6 +81,13 @@ def clean_text(text: str) -> str:
     except Exception:
         pass
     return " ".join(text.split())
+def parse_iso_utc(s: str) -> datetime:
+    """Безопасный парсер ISO-дат, всегда возвращает datetime с UTC."""
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 # ---------------- Ollama local fallback ----------------
 async def summarize_ollama(text: str):
@@ -187,56 +194,74 @@ async def check_sources():
 
 # ---------------- Отправка новостей ----------------
 async def send_news():
-    all_news=[]
+    all_news = []
     if os.path.exists("news_queue.json"):
         try:
-            with open("news_queue.json","r",encoding="utf-8") as f:
-                queued=json.load(f)
-            all_news.extend([(t,l,s,datetime.fromisoformat(p)) for t,l,s,p in queued])
+            with open("news_queue.json", "r", encoding="utf-8") as f:
+                queued = json.load(f)
+            all_news.extend([(t, l, s, datetime.fromisoformat(p)) for t, l, s, p in queued])
             os.remove("news_queue.json")
-        except: pass
+        except:
+            pass
 
     results = await asyncio.gather(*[fetch_and_check(url) for url in RSS_URLS])
-    for r in results: all_news.extend(r)
-    if not all_news: return
+    for r in results:
+        all_news.extend(r)
+    if not all_news:
+        return
 
-    cutoff=datetime.now(timezone.utc)-timedelta(days=DAYS_LIMIT)
-    all_news=[n for n in all_news if n[3] and n[3]>=cutoff]
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
+    all_news = [n for n in all_news if n[3] and n[3] >= cutoff]
 
     try:
-        with open(SENT_LINKS_FILE,"r",encoding="utf-8") as f: data=json.load(f)
-        sent_links=data.get("links",{}); last_index=data.get("last_source_index",0)
-    except: sent_links,last_index={},0
-    sent_links={k:v for k,v in sent_links.items() if datetime.strptime(v,"%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)>=cutoff}
+        with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sent_links = data.get("links", {})
+        last_index = data.get("last_source_index", 0)
+    except:
+        sent_links, last_index = {}, 0
+
+    # ✅ читаем даты в ISO-формате
+    sent_links = {
+        k: v for k, v in sent_links.items()
+        if parse_iso_utc(v) >= cutoff
+    }
+
 
     if ROUND_ROBIN_MODE:
-        sources=defaultdict(deque)
-        for t,l,s,p in sorted(all_news,key=lambda x:x[3],reverse=True): sources[s].append((t,l,s,p))
-        src_list=list(sources.keys()); queue,i=[],last_index
+        sources = defaultdict(deque)
+        for t, l, s, p in sorted(all_news, key=lambda x: x[3], reverse=True):
+            sources[s].append((t, l, s, p))
+        src_list = list(sources.keys())
+        queue, i = [], last_index
         while any(sources.values()):
-            s=src_list[i%len(src_list)]
-            if sources[s]: queue.append(sources[s].popleft())
-            i+=1
-        new_items=[n for n in queue if n[1] not in sent_links]
-    else: new_items=[n for n in sorted(all_news,key=lambda x:x[3],reverse=True) if n[1] not in sent_links]
+            s = src_list[i % len(src_list)]
+            if sources[s]:
+                queue.append(sources[s].popleft())
+            i += 1
+        new_items = [n for n in queue if n[1] not in sent_links]
+    else:
+        new_items = [n for n in sorted(all_news, key=lambda x: x[3], reverse=True)
+                     if n[1] not in sent_links]
 
     total = len(new_items)
-    if total <= BATCH_SIZE_SMALL: pause=PAUSE_SMALL
-    elif total <= BATCH_SIZE_MEDIUM: pause=PAUSE_MEDIUM
-    else: pause=PAUSE_LARGE
+    if total <= BATCH_SIZE_SMALL:
+        pause = PAUSE_SMALL
+    elif total <= BATCH_SIZE_MEDIUM:
+        pause = PAUSE_MEDIUM
+    else:
+        pause = PAUSE_LARGE
 
     current_batch = new_items[:NEWS_LIMIT or total]
     queue_rest = new_items[NEWS_LIMIT or total:]
 
-    sent_count=0
-    for t,l,s,p in current_batch:
-        local_time=(p or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    sent_count = 0
+    for t, l, s, p in current_batch:
+        local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
 
-        # --- Получаем резюме и модель ---
         summary_text, used_model = await summarize(f"{t}\n{l}")
 
-        # --- Лимиты заголовка и резюме ---
         MAX_SUMMARY_LEN = 600
         MAX_TITLE_LEN = 120
 
@@ -248,7 +273,6 @@ async def send_news():
         if len(summary_clean) > MAX_SUMMARY_LEN:
             summary_clean = summary_clean[:MAX_SUMMARY_LEN].rsplit(" ", 1)[0] + "…"
 
-        # --- Форматируем карточку ---
         text = (
             f"━━━━━━━━━━━━━━━\n"
             f"📰 <b>{title_clean}</b>\n"
@@ -260,26 +284,31 @@ async def send_news():
         )
 
         for _ in range(3):
-            try: 
-                await bot.send_message(chat_id=CHAT_ID,text=text,parse_mode="HTML")
-                sent_links[l]=local_time_str
-                sent_count+=1
+            try:
+                await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+                # ✅ сохраняем ISO-дату
+                sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
+                sent_count += 1
                 logging.info(f"📤 Новость отправлена в Telegram: {title_clean[:50]}...")
                 break
-            except Exception as e: 
+            except Exception as e:
                 logging.error(f"❌ Ошибка отправки: {e}")
                 await asyncio.sleep(5)
         await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
     if queue_rest:
-        with open("news_queue.json","w",encoding="utf-8") as f:
-            json.dump([(t,l,s,p.isoformat()) for t,l,s,p in queue_rest],f,ensure_ascii=False,indent=2)
+        with open("news_queue.json", "w", encoding="utf-8") as f:
+            json.dump([(t, l, s, p.isoformat()) for t, l, s, p in queue_rest],
+                      f, ensure_ascii=False, indent=2)
 
-    save={"links":sent_links}
-    if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list: save["last_source_index"]=(last_index+sent_count)%len(src_list)
-    tmp=SENT_LINKS_FILE+".tmp"
-    with open(tmp,"w",encoding="utf-8") as f: json.dump(save,f,ensure_ascii=False,indent=2)
-    os.replace(tmp,SENT_LINKS_FILE)
+    save = {"links": sent_links}
+    if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list:
+        save["last_source_index"] = (last_index + sent_count) % len(src_list)
+    tmp = SENT_LINKS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(save, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SENT_LINKS_FILE)
+
     logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей, пауза перед следующим батчем {pause} сек")
     await asyncio.sleep(pause)
 
