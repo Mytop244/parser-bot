@@ -81,13 +81,14 @@ def clean_text(text: str) -> str:
     except Exception:
         pass
     return " ".join(text.split())
-def parse_iso_utc(s: str) -> datetime:
-    """Безопасный парсер ISO-дат, всегда возвращает datetime с UTC."""
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
+def parse_iso_utc(s):
+    from datetime import datetime
+    for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Неверный формат даты: {s}")
 
 # ---------------- Ollama local fallback ----------------
 async def summarize_ollama(text: str):
