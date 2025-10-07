@@ -84,115 +84,150 @@ def clean_text(text: str) -> str:
     return " ".join(text.split())
 from datetime import datetime, timezone
 
-def parse_iso_utc(s):
-    for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            dt = datetime.strptime(s, fmt)
-            return dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    raise ValueError(f"Неверный формат даты: {s}")
+def parse_iso_utc(s: str):
+    if not s:
+        raise ValueError("empty date")
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                dt = None
+        if dt is None:
+            raise ValueError(f"Неверный формат даты: {s}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
 
 # ---------------- Ollama local fallback ----------------
+# ---------------- Ollama HTTP API ----------------
 async def summarize_ollama(text: str):
     short_text = ". ".join(text.split(".")[:3])
     prompt = f"Сделай краткое резюме новости:\n{short_text}"
 
     async def run_model(model_name: str):
-        cmd = ["ollama", "run", model_name, prompt]
+        url = "http://127.0.0.1:11434/api/generate"
+        payload = {"model": model_name, "prompt": prompt, "stream": False}
         start_time = time.time()
         try:
-            logging.info(f"🧠 Ollama: {model_name} — создаю резюме...")
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=240,
-                encoding="utf-8",  # ✅ добавить
-                errors="ignore"    # ✅ чтобы пропускать невалидные символы
-            )
-
-            elapsed = round(time.time() - start_time, 2)
-            output = result.stdout.strip()
-            if not output:
-                logging.warning(f"⚠️ Ollama ({model_name}) вернул пустой ответ за {elapsed} сек")
-                return None, model_name
-            logging.info(f"✅ Ollama ({model_name}) ответ за {elapsed} сек ({len(output)} символов)")
-            return output, model_name
-        except subprocess.TimeoutExpired:
-            logging.error(f"⏰ Ollama ({model_name}) не ответил — таймаут")
-            return None, model_name
-        except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Ошибка Ollama ({model_name}, код {e.returncode}): {e.stderr or e}")
-            return None, model_name
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=60) as resp:
+                    if resp.status != 200:
+                        logging.error(f"⚠️ Ollama {model_name} HTTP {resp.status}")
+                        return None, model_name
+                    data = await resp.json()
+                    output = data.get("response", "").strip()
+                    if not output:
+                        logging.warning(f"⚠️ Ollama ({model_name}) вернул пустой ответ")
+                        return None, model_name
+                    elapsed = round(time.time() - start_time, 2)
+                    logging.info(f"✅ Ollama ({model_name}) ответ за {elapsed} сек")
+                    return output, model_name
+        except asyncio.TimeoutError:
+            logging.error(f"⏰ Ollama ({model_name}) таймаут")
         except Exception as e:
-            logging.error(f"❌ Неожиданная ошибка Ollama ({model_name}): {e}")
-            return None, model_name
+            logging.error(f"❌ Ошибка Ollama ({model_name}): {e}")
+        return None, model_name
 
-    # Основная модель
     result, used_model = await run_model(OLLAMA_MODEL)
     if not result:
         logging.warning(f"⚠️ Переключаюсь на резервную модель {OLLAMA_MODEL_FALLBACK}")
         result, used_model = await run_model(OLLAMA_MODEL_FALLBACK)
 
     if not result:
-        logging.error("❌ Обе модели Ollama не дали результата, возвращаю fallback")
+        logging.error("❌ Обе модели Ollama не дали результат, возвращаю fallback")
         return short_text[:400] + "...", "local-fallback"
 
     return result, used_model
 
 # ---------------- Gemini Summary ----------------
-async def summarize(text, max_tokens=200):
+# ---------------- Gemini Summary ----------------
+async def summarize(text, max_tokens=200, retries=3):
     if not AI_STUDIO_KEY:
-        logging.warning("⚠️ AI_STUDIO_KEY не задан, использую локальную Ollama")
+        logging.warning("⚠️ AI_STUDIO_KEY не задан, использую Ollama")
         return await summarize_ollama(text)
 
     text = clean_text(text)
     short_text = ". ".join(text.split(".")[:2])
-    logging.info(f"🤖 Gemini: готовлю резюме для текста: {short_text[:60]}...")
-
-    try:
-        quota_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:getQuota?key={AI_STUDIO_KEY}"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(quota_url) as resp:
-                if resp.status == 200:
-                    quota_data = await resp.json()
-                    remaining = quota_data.get("freeTierRemaining", 0)
-                    logging.info(f"⏱ Gemini квота осталась: {remaining}")
-                    if remaining <= 0:
-                        logging.warning("⚠️ Квота Gemini исчерпана, fallback на Ollama")
-                        return await summarize_ollama(text)
-    except Exception as e:
-        logging.warning(f"⚠️ Ошибка проверки квоты Gemini: {e}")
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_STUDIO_KEY}"
     payload = {
         "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
     }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    headers = {
+        "x-goog-api-key": AI_STUDIO_KEY,
+        "Content-Type": "application/json"
+    }
 
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            async with session.post(url, json=payload) as resp:
-                result = await resp.json()
-                if resp.status == 429 or "quotaExceeded" in str(result).lower():
-                    logging.warning("⚠️ Квота Gemini исчерпана, fallback на Ollama")
-                    return await summarize_ollama(text)
-                candidates = result.get("candidates")
-                if not candidates or not isinstance(candidates, list):
-                    logging.warning("⚠️ Нет candidates в ответе Gemini, fallback на Ollama")
-                    return await summarize_ollama(text)
-                text_out = candidates[0].get("content", {}).get("parts", [{}])[0].get("text")
-                if not text_out:
-                    logging.warning("⚠️ Пустой текст от Gemini, fallback на Ollama")
-                    return await summarize_ollama(text)
-                logging.info(f"✅ Получено резюме Gemini: {text_out[:100]}...")
-                return text_out.strip(), GEMINI_MODEL
-    except Exception as e:
-        logging.warning(f"⚠️ Ошибка Gemini: {e}, fallback на Ollama")
-        return await summarize_ollama(text)
+    backoff = 1
+    for attempt in range(1, retries + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    body = await resp.text()
+                    logging.debug(f"Gemini raw response [{resp.status}]: {body[:500]}")
+
+                    if resp.status == 429:
+                        logging.warning("⚠️ Gemini rate limit — 30s pause")
+                        await asyncio.sleep(30)
+                        continue
+                    if resp.status >= 400:
+                        logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body}")
+                        await asyncio.sleep(backoff)
+                        backoff *= 2
+                        continue
+
+                    try:
+                        result = json.loads(body)
+                    except Exception as e:
+                        logging.warning(f"⚠️ Ошибка JSON Gemini: {e}")
+                        await asyncio.sleep(backoff)
+                        backoff *= 2
+                        continue
+
+        except asyncio.TimeoutError:
+            logging.warning("⚠️ Gemini timeout — retrying")
+            await asyncio.sleep(backoff); backoff *= 2
+            continue
+        except Exception as e:
+            logging.warning(f"⚠️ Gemini network error: {e}")
+            await asyncio.sleep(backoff); backoff *= 2
+            continue
+
+        # --- безопасное извлечение текста ---
+        text_out = None
+        try:
+            candidates = result.get("candidates")
+            if candidates and isinstance(candidates, list):
+                content = candidates[0].get("content", {})
+                if isinstance(content, dict):
+                    parts = content.get("parts", [])
+                    if parts and isinstance(parts[0], dict):
+                        text_out = parts[0].get("text")
+            if not text_out:
+                text_out = result.get("output") or result.get("response")
+        except Exception as e:
+            logging.warning(f"⚠️ Ошибка извлечения текста: {e}")
+
+        if not text_out or not str(text_out).strip():
+            logging.warning(f"⚠️ Gemini пустой ответ, попытка {attempt}/{retries}")
+            await asyncio.sleep(backoff)
+            backoff *= 2
+            continue
+
+        text_out = text_out.strip()
+        logging.info(f"✅ Gemini OK ({GEMINI_MODEL}): {text_out[:100]}...")
+        return text_out, GEMINI_MODEL
+
+    logging.error("❌ Gemini не дал ответа — fallback на Ollama")
+    return await summarize_ollama(text)
 
 # ---------------- Проверка источников ----------------
 async def check_sources():
@@ -301,8 +336,11 @@ async def send_news():
                 break
             except Exception as e:
                 logging.error(f"❌ Ошибка отправки: {e}")
-                await asyncio.sleep(5)
-        await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
+                if "429" in str(e):
+                    await asyncio.sleep(30)
+        else:
+            await asyncio.sleep(5)
+
 
     if queue_rest:
         with open("news_queue.json", "w", encoding="utf-8") as f:
