@@ -103,13 +103,17 @@ async def summarize_ollama(text: str):
         start_time = time.time()
         try:
             logging.info(f"🧠 Ollama: {model_name} — создаю резюме...")
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=40
+                timeout=240,
+                encoding="utf-8",  # ✅ добавить
+                errors="ignore"    # ✅ чтобы пропускать невалидные символы
             )
+
             elapsed = round(time.time() - start_time, 2)
             output = result.stdout.strip()
             if not output:
