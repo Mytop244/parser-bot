@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
+from datetime import datetime, timezone 
 
 # ---------------- ENV ----------------
 load_dotenv()
@@ -81,11 +82,13 @@ def clean_text(text: str) -> str:
     except Exception:
         pass
     return " ".join(text.split())
+from datetime import datetime, timezone
+
 def parse_iso_utc(s):
-    from datetime import datetime
-    for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M"):
+    for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(s, fmt)
+            dt = datetime.strptime(s, fmt)
+            return dt.replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     raise ValueError(f"Неверный формат даты: {s}")
