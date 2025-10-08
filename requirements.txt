@@ -1,6 +1,5 @@
 aiohttp
+feedparser
 beautifulsoup4
-lxml
-python-telegram-bot
 python-dotenv
-playwright
+python-telegram-bot
