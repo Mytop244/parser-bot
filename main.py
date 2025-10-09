@@ -46,7 +46,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 
 # ---------------- LOG ----------------
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
@@ -366,5 +366,14 @@ async def main():
         await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
-    logging.info("🚀 Запуск бота...")
+    import sys
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logging.getLogger().setLevel(logging.DEBUG)
+
+    print("🚀 Запуск бота...", flush=True)
+    logging.info("🚀 Логгер инициализирован")
     asyncio.run(main())
