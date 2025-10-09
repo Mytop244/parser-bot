@@ -1,5 +1,7 @@
 aiohttp
-feedparser
 beautifulsoup4
-python-dotenv
+feedparser
+readability-lxml
+trafilatura
 python-telegram-bot
+
