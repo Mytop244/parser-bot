@@ -12,7 +12,7 @@ except ImportError:
 
 
 async def extract_article_text(url: str, ssl_context=None) -> str:
-    """Извлекает основной текст статьи (3 попытки + fallback)."""
+    """Извлекает основной текст статьи (3 попытки + fallback) с логированием."""
     ctx = ssl_context or ssl_ctx
     html = ""
 
@@ -35,13 +35,14 @@ async def extract_article_text(url: str, ssl_context=None) -> str:
     for tag in soup(["script", "style", "noscript", "header", "footer", "aside"]):
         tag.decompose()
 
-    # ---------- 2. Простой метод ----------
+    loop = asyncio.get_running_loop()
+
+    # ---------- 2. Простой метод <p> ----------
     paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
     text = clean_text(" ".join(paragraphs))
-    if isinstance(text, str) and len(text.split()) >= 50:
-        return text[:5000].rsplit(" ", 1)[0]
-
-    loop = asyncio.get_running_loop()
+    logging.debug(f"[simple <p>] len={len(text.split())}")
+    if isinstance(text, str) and len(text.split()) >= 20:  # порог снижен
+        return text[:10000].rsplit(" ", 1)[0]
 
     # ---------- 3. Trafilatura ----------
     try:
@@ -49,8 +50,11 @@ async def extract_article_text(url: str, ssl_context=None) -> str:
         def trafilatura_extract(html_inner):
             return trafilatura.extract(html_inner, include_comments=False, favor_recall=True)
         extracted = await loop.run_in_executor(None, partial(trafilatura_extract, html))
-        if extracted and len(extracted.split()) >= 30:
-            return clean_text(extracted)[:5000].rsplit(" ", 1)[0]
+        if extracted:
+            extracted = clean_text(extracted)
+            logging.debug(f"[trafilatura] len={len(extracted.split())}")
+            if len(extracted.split()) >= 15:  # порог снижен
+                return extracted[:10000].rsplit(" ", 1)[0]
     except Exception as e:
         logging.debug(f"trafilatura fail: {e}")
 
@@ -62,8 +66,11 @@ async def extract_article_text(url: str, ssl_context=None) -> str:
             summary_html = doc.summary()
             return BeautifulSoup(summary_html, "html.parser").get_text(" ", strip=True)
         extracted = await loop.run_in_executor(None, partial(readability_extract, html))
-        if extracted and len(extracted.split()) >= 30:
-            return clean_text(extracted)[:5000].rsplit(" ", 1)[0]
+        if extracted:
+            extracted = clean_text(extracted)
+            logging.debug(f"[readability] len={len(extracted.split())}")
+            if len(extracted.split()) >= 15:  # порог снижен
+                return extracted[:10000].rsplit(" ", 1)[0]
     except Exception as e:
         logging.debug(f"readability fail: {e}")
 
@@ -72,6 +79,9 @@ async def extract_article_text(url: str, ssl_context=None) -> str:
             soup.find("meta", property="og:description") or
             soup.find("meta", property="twitter:description"))
     if meta and meta.get("content"):
-        return clean_text(meta.get("content", ""))[:1000].rsplit(" ", 1)[0]
+        content = clean_text(meta.get("content", ""))
+        logging.debug(f"[meta fallback] len={len(content.split())}")
+        return content[:1000].rsplit(" ", 1)[0]
 
+    logging.debug("[extract_article_text] ничего не извлечено")
     return ""

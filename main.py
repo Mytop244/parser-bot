@@ -7,6 +7,17 @@ from telegram import Bot
 from bs4 import BeautifulSoup
 from article_parser import extract_article_text
 
+# ---- dedup seen links across restarts ----
+SEEN_FILE = "seen.json"
+if os.path.exists(SEEN_FILE):
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            seen_links = set(json.load(f))
+    except Exception:
+        seen_links = set()
+else:
+    seen_links = set()
+
 # ---------------- ENV ----------------
 load_dotenv()
 if hasattr(time, "tzset"):
@@ -45,15 +56,50 @@ if not RSS_URLS:
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ---------------- LOG ----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("parser.log", encoding="utf-8")
-    ]
-)
 
+LOG_FILE = "parser.log"
+
+# --- Цвета для терминала ---
+RESET = "\033[0m"
+COLORS = {
+    "DEBUG": "\033[90m",
+    "INFO": "\033[94m",
+    "WARNING": "\033[93m",
+    "ERROR": "\033[91m",
+    "CRITICAL": "\033[95m"
+}
+
+class ColorFormatter(logging.Formatter):
+    def format(self, record):
+        level_color = COLORS.get(record.levelname, "")
+        msg = super().format(record)
+        return f"{level_color}{msg}{RESET}"
+
+# --- Формат ---
+formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+# --- Файл (без цвета) ---
+os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+file_handler.setFormatter(formatter)
+
+# --- Терминал (с цветом) ---
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(ColorFormatter("%(asctime)s | %(levelname)s | %(message)s"))
+
+# --- Настройка корневого логгера ---
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
+# --- Отдельный логгер для моделей ---
+model_logger = logging.getLogger("model")
+model_logger.setLevel(logging.INFO)
+model_logger.addHandler(console_handler)
+model_logger.addHandler(file_handler)
+
+# ---------------- SSL CONTEXT ----------------
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -75,10 +121,13 @@ async def fetch_and_check(url, head_only=False):
                     pub = None
                     if getattr(e, "published_parsed", None):
                         pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
+                    # Попробуем взять summary/description из записи, если есть
+                    summary = e.get("summary", "") or e.get("description", "") or ""
                     news.append((
                         e.get("title", "Без заголовка").strip(),
                         e.get("link", "").strip(),
                         feed.feed.get("title", "Неизвестный источник").strip(),
+                        summary,
                         pub
                     ))
                 return news
@@ -122,7 +171,7 @@ def parse_iso_utc(s):
 async def summarize_ollama(text: str):
     short_text = ". ".join(text.split(".")[:3])
     prompt = f"Сделай краткое резюме новости:\n{short_text}"
-    logging.debug(f"🧠 [OLLAMA INPUT] {short_text[:500]}...")
+    logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt}")
     async def run_model(model_name: str):
         url = "http://127.0.0.1:11434/api/generate"
         payload = {"model": model_name, "prompt": prompt, "stream": False}
@@ -140,7 +189,7 @@ async def summarize_ollama(text: str):
                         return None, model_name
                     elapsed = round(time.time() - start_time, 2)
                     logging.info(f"✅ Ollama ({model_name}) за {elapsed} сек")
-                    logging.debug(f"🧠 [OLLAMA OUTPUT] {output[:500]}...")
+                    logging.info(f"🧠 [OLLAMA OUTPUT] <<< {output}")
                     return output, model_name
         except asyncio.TimeoutError:
             logging.error(f"⏰ Ollama ({model_name}) таймаут")
@@ -177,6 +226,7 @@ async def summarize(text, max_tokens=200, retries=3):
     backoff = 1
     for attempt in range(1, retries + 1):
         try:
+            logging.info(f"🧠 [GEMINI INPUT] >>> {payload['contents'][0]['parts'][0]['text']}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -200,7 +250,7 @@ async def summarize(text, max_tokens=200, retries=3):
                 if parts and "text" in parts[0]:
                     text_out = parts[0]["text"]
                     logging.info(f"✅ Gemini OK ({GEMINI_MODEL}): {text_out[:100]}...")
-                    logging.debug(f"🧠 [GEMINI OUTPUT] {text_out[:500]}...")
+                    logging.info(f"🧠 [GEMINI OUTPUT] <<< {text_out}")
                     return text_out.strip(), GEMINI_MODEL
         except Exception as e:
             logging.warning(f"⚠️ Ошибка парсинга Gemini: {e}")
@@ -231,14 +281,29 @@ async def send_news():
         try:
             with open("news_queue.json", "r", encoding="utf-8") as f:
                 queued = json.load(f)
-            all_news.extend([(t, l, s, datetime.fromisoformat(p)) for t, l, s, p in queued])
+            # Поддерживаем старый формат (t, l, s, p) и новый (t, l, s, summary, p)
+            for item in queued:
+                if len(item) == 4:
+                    t, l, s, p = item
+                    all_news.append((t, l, s, "", datetime.fromisoformat(p)))
+                elif len(item) == 5:
+                    t, l, s, summary, p = item
+                    all_news.append((t, l, s, summary, datetime.fromisoformat(p)))
             os.remove("news_queue.json")
         except Exception:
             pass
 
     results = await asyncio.gather(*[fetch_and_check(url) for url in RSS_URLS])
     for r in results:
-        all_news.extend(r)
+        # `r` может быть либо [] при ошибке, либо список кортежей из fetch_and_check
+        # Убедимся, что элементы имеют 5 элементов (t, l, s, summary, pub)
+        for it in r:
+            if len(it) == 4:
+                # старый формат без summary
+                t, l, s, p = it
+                all_news.append((t, l, s, "", p))
+            elif len(it) == 5:
+                all_news.append(it)
     if not all_news:
         return
 
@@ -263,8 +328,8 @@ async def send_news():
 
     if ROUND_ROBIN_MODE:
         sources = defaultdict(deque)
-        for t, l, s, p in sorted(all_news, key=lambda x: x[3], reverse=True):
-            sources[s].append((t, l, s, p))
+        for t, l, s, summary, p in sorted(all_news, key=lambda x: x[4], reverse=True):
+            sources[s].append((t, l, s, summary, p))
         src_list = list(sources.keys())
         queue, i = [], last_index
         while any(sources.values()):
@@ -274,7 +339,8 @@ async def send_news():
             i += 1
         new_items = [n for n in queue if n[1] not in sent_links]
     else:
-        new_items = [n for n in sorted(all_news, key=lambda x: x[3], reverse=True)
+        # all_news items have format (t, l, s, summary, p) — используем индекс 4 для даты
+        new_items = [n for n in sorted(all_news, key=lambda x: x[4], reverse=True)
                      if n[1] not in sent_links]
 
     total = len(new_items)
@@ -289,17 +355,27 @@ async def send_news():
     queue_rest = new_items[NEWS_LIMIT or total:]
 
     sent_count = 0
-    for t, l, s, p in current_batch:
+    # Поддерживаем элементы с summary: (t, l, s, summary, p)
+    for item in current_batch:
+        if len(item) == 5:
+            t, l, s, summary, p = item
+        else:
+            t, l, s, summary, p = item[0], item[1], item[2], "", item[3]
         local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
 
         try:
+            summary = clean_text(summary or "")
             article_text = await extract_article_text(l, ssl_ctx)
         except Exception as e:
             logging.warning(f"extract_article_text error for {l}: {e}")
             article_text = None
 
-        content = article_text if article_text else f"{t}\n{l}"
+        if not article_text or len(article_text) < 300:
+            content = f"{t}\n{summary or ''}\n{article_text}"
+        else:
+            content = article_text
+
         summary_text, used_model = await summarize(content)
 
         MAX_SUMMARY_LEN = 600
@@ -321,10 +397,16 @@ async def send_news():
             f"🔗 <a href=\"{l}\">Читать статью</a>"
         )
 
+        # Проверяем, отправляли ли уже ссылку ранее (между перезапусками)
+        if l in seen_links:
+            logging.debug(f"🔁 Пропускаю уже отправленную ссылку: {l}")
+            continue
+
         for _ in range(3):
             try:
                 await send_telegram(text)
                 sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
+                seen_links.add(l)
                 sent_count += 1
                 logging.info(f"📤 Отправлено: {title_clean[:50]}...")
                 break
@@ -335,11 +417,31 @@ async def send_news():
         else:
             await asyncio.sleep(5)
 
-    if queue_rest:
-        with open("news_queue.json", "w", encoding="utf-8") as f:
-            json.dump([(t, l, s, p.isoformat()) for t, l, s, p in queue_rest],
-                      f, ensure_ascii=False, indent=2)
+        if queue_rest:
+            safe_queue = []
+            for item in queue_rest:
+                if len(item) == 5:
+                    t, l, s, summary, p = item
+                elif len(item) == 4:
+                    t, l, s, p = item
+                    summary = ""
+                else:
+                    continue
 
+                # если p может быть строкой — приводи к iso
+                if isinstance(p, str):
+                    try:
+                        p = datetime.fromisoformat(p)
+                    except Exception:
+                        pass
+
+                iso_p = p.isoformat() if hasattr(p, "isoformat") else str(p)
+                safe_queue.append((t, l, s, summary, iso_p))
+
+            with open("news_queue.json", "w", encoding="utf-8") as f:
+                json.dump(safe_queue, f, ensure_ascii=False, indent=2)
+
+          
     save = {"links": sent_links}
     if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list:
         save["last_source_index"] = (last_index + sent_count) % len(src_list)
@@ -347,6 +449,13 @@ async def send_news():
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(save, f, ensure_ascii=False, indent=2)
     os.replace(tmp, SENT_LINKS_FILE)
+
+    # Сохраняем список уже отправленных ссылок между перезапусками
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(seen_links), f, ensure_ascii=False, indent=2)
+    except Exception:
+        logging.warning("⚠️ Не удалось сохранить seen.json")
 
     logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей. Пауза {pause} сек")
     await asyncio.sleep(pause)
