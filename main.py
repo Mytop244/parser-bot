@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
-from article_parser import extract_article_text, PARSER_TEXT_LIMIT
+from article_parser import extract_article_text
 
 # ---- dedup seen links across restarts ----
 SEEN_FILE = "seen.json"
@@ -38,8 +38,10 @@ AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
 GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_MODEL_FALLBACK = os.environ.get("OLLAMA_MODEL_FALLBACK", "gpt-oss:120b")
-PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH", os.environ.get("MAX_TEXT_LENGTH", 10000)))
-MAX_TEXT_LENGTH = int(os.getenv("PARSER_MAX_TEXT_LENGTH", 5000))
+PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH",
+                                           os.environ.get("MAX_TEXT_LENGTH", "10000")))
+# legacy alias
+MAX_TEXT_LENGTH = PARSER_MAX_TEXT_LENGTH
 MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 500))
 
 # Батчи
@@ -145,6 +147,7 @@ def clean_text(text: str) -> str:
         pass
     return " ".join(text.split())
 
+from html import escape
 def parse_iso_utc(s):
     if isinstance(s, datetime):
         return s.astimezone(timezone.utc)
@@ -212,13 +215,13 @@ async def summarize_ollama(text: str):
 
 # ---------------- Gemini ----------------
 async def summarize(text, max_tokens=200, retries=3):
+    text = clean_text(text)
+    short_text = ". ".join(text.split(".")[:2])
+
     if not AI_STUDIO_KEY:
         logging.debug(f"🧠 [GEMINI INPUT] {short_text[:500]}...")
         logging.warning("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
         return await summarize_ollama(text)
-
-    text = clean_text(text)
-    short_text = ". ".join(text.split(".")[:2])
     prompt_text = f"Сделай краткое резюме новости:\n{short_text}"
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
@@ -401,15 +404,21 @@ async def send_news():
             summary_clean = summary_clean[:MAX_SUMMARY_LEN].rsplit(" ", 1)[0] + "…"
 
         # --- Формируем сообщение для Telegram ---
+        title_safe = escape(title_clean)
+        summary_safe = escape(summary_clean)
+        link_safe = escape(l, quote=True)
+
         text = (
-            f"<b>{title_clean}</b>\n"
+            f"<b>{title_safe}</b>\n"
             f"📡 <i>{s}</i> | 🗓 {local_time_str}\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"💬 {summary_clean}\n"
+            f"💬 {summary_safe}\n"
             f"━━━━━━━━━━━━━━━\n"
             f"🤖 <i>Модель: {used_model}</i>\n"
-            f"🔗 <a href=\"{l}\">Читать статью</a>"
+            f"🔗 <a href=\"{link_safe}\">Читать статью</a>"
         )
+        if len(text) > 4000:
+            text = text[:3997] + "…"
 
         # Проверяем, отправляли ли уже ссылку ранее (между перезапусками)
         if l in seen_links:
@@ -476,9 +485,9 @@ async def send_news():
 
 # ---------------- MAIN LOOP ----------------
 async def main():
-    last_check = datetime.min
+    last_check = datetime.now(timezone.utc)
     while True:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         if (now - last_check) > timedelta(days=1):
             await check_sources()
             last_check = now
@@ -489,16 +498,8 @@ async def main():
         await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
-    import sys
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    logging.getLogger().setLevel(logging.DEBUG)
-
     print("🚀 Запуск бота...", flush=True)
-    logging.info("🚀 Логгер инициализирован")
+    logging.getLogger().setLevel(logging.DEBUG)
     logging.info(f"💬 MODEL_MAX_TOKENS = {MODEL_MAX_TOKENS}")
-    logging.info(f"📰 PARSER_TEXT_LIMIT = {PARSER_TEXT_LIMIT}")
+    logging.info(f"📰 PARSER_MAX_TEXT_LENGTH = {PARSER_MAX_TEXT_LENGTH}")
     asyncio.run(main())
