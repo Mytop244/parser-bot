@@ -47,6 +47,13 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 180))
 MAX_TEXT_LENGTH = PARSER_MAX_TEXT_LENGTH
 MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 1200))
 
+# Модельные лимиты (можно переопределить в .env)
+GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", 1200))
+OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", 800))
+
+# Какая модель считается активной по умолчанию (можно задать через .env)
+ACTIVE_MODEL = os.getenv("ACTIVE_MODEL", GEMINI_MODEL)
+
 # Батчи
 BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
 PAUSE_SMALL = int(os.environ.get("PAUSE_SMALL", 3))
@@ -442,7 +449,18 @@ async def send_news():
         logging.debug(f"📝 Контент для модели ({len(content)} символов): {content}")
 
         # --- Генерация ---
-        summary_text, used_model = await summarize(content, max_tokens=MODEL_MAX_TOKENS)
+        # Определяем лимит токенов по типу активной модели
+        try:
+            active = (ACTIVE_MODEL or "").lower()
+        except Exception:
+            active = ""
+        if "gemini" in active:
+            max_tokens = GEMINI_MAX_TOKENS
+        else:
+            max_tokens = OLLAMA_MAX_TOKENS
+
+        logging.info(f"🧩 Используем лимит {max_tokens} токенов для {ACTIVE_MODEL}")
+        summary_text, used_model = await summarize(content, max_tokens=max_tokens)
 
         # --- Усечение заголовка и резюме ---
         MAX_SUMMARY_LEN = 1200
