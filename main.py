@@ -41,6 +41,8 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_MODEL_FALLBACK = os.environ.get("OLLAMA_MODEL_FALLBACK", "gpt-oss:120b")
 PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH",
                                            os.environ.get("MAX_TEXT_LENGTH", "10000")))
+# Ollama timeout (seconds)
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 180))
 # legacy alias
 MAX_TEXT_LENGTH = PARSER_MAX_TEXT_LENGTH
 MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 1200))
@@ -189,13 +191,39 @@ async def summarize_ollama(text: str):
         payload = {"model": model_name, "prompt": prompt, "options": {"num_predict": MODEL_MAX_TOKENS}}
         start_time = time.time()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=60) as resp:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)) as resp:
                     if resp.status != 200:
                         logging.error(f"⚠️ Ollama {model_name} HTTP {resp.status}")
                         return None, model_name
-                    data = await resp.json()
-                    output = data.get("response", "").strip()
+
+                    # Поддержка NDJSON / stream: аккумулируем все поля `response` из приходящих JSON-объектов
+                    text = ""
+                    try:
+                        async for chunk in resp.content:
+                            if not chunk:
+                                continue
+                            try:
+                                s = chunk.decode("utf-8")
+                            except Exception:
+                                # если не можем декодировать — пропускаем
+                                continue
+                            # строка может содержать несколько JSON-объектов, разберём по строкам
+                            for line in s.splitlines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    data = json.loads(line)
+                                except Exception:
+                                    # если это не валидный JSON — пропускаем
+                                    continue
+                                text += data.get("response", "")
+                    except Exception as e:
+                        logging.error(f"❌ Ollama ({model_name}) stream error: {e}")
+                        return None, model_name
+
+                    output = text.strip()
                     if not output:
                         logging.warning(f"⚠️ Ollama ({model_name}) пустой ответ")
                         return None, model_name
@@ -249,6 +277,9 @@ async def summarize(text, max_tokens=200, retries=3):
                 async with session.post(url, json=payload, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     body = await resp.text()
+                    if resp.status == 429:
+                        logging.warning("⚠️ Gemini quota exceeded — fallback to Ollama")
+                        return await summarize_ollama(text)
                     if resp.status >= 400:
                         logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body}")
                         await asyncio.sleep(backoff)
@@ -268,10 +299,10 @@ async def summarize(text, max_tokens=200, retries=3):
                 if parts and "text" in parts[0]:
                     text_out = parts[0]["text"]
                     logging.info(f"✅ Gemini OK ({GEMINI_MODEL}): {text_out}")
-                    logging.info(f"🧠 [GEMINI OUTPUT] <<< {text_out}")
                     return text_out.strip(), GEMINI_MODEL
         except Exception as e:
             logging.warning(f"⚠️ Ошибка парсинга Gemini: {e}")
+
     logging.error("❌ Gemini не ответил, fallback на Ollama")
     return await summarize_ollama(text)
 
