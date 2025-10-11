@@ -8,16 +8,40 @@ from bs4 import BeautifulSoup
 from article_parser import extract_article_text
 from utils import send_long_message
 
-# ---- dedup seen links across restarts ----
-SEEN_FILE = "seen.json"
-if os.path.exists(SEEN_FILE):
+# ---- unified persistent state with cleanup ----
+STATE_FILE = "state.json"
+STATE_DAYS_LIMIT = int(os.getenv("STATE_DAYS_LIMIT", 3))  # хранить ссылки не старше N дней
+
+# state stores timestamps (epoch seconds) for seen and sent links
+state = {"seen": {}, "sent": {}}
+
+if os.path.exists(STATE_FILE):
     try:
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            seen_links = set(json.load(f))
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            state["seen"] = data.get("seen", {}) or {}
+            state["sent"] = data.get("sent", {}) or {}
     except Exception:
-        seen_links = set()
-else:
-    seen_links = set()
+        state = {"seen": {}, "sent": {}}
+
+def cleanup_state():
+    now = time.time()
+    cutoff = now - STATE_DAYS_LIMIT * 86400
+    for k in ("seen", "sent"):
+        state[k] = {url: ts for url, ts in state.get(k, {}).items() if ts >= cutoff}
+
+def save_state():
+    cleanup_state()
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logging.exception("Не удалось сохранить state.json")
+
+def mark_state(key, url):
+    state.setdefault(key, {})
+    state[key][url] = int(time.time())
+    save_state()
 
 # ---------------- ENV ----------------
 load_dotenv()
@@ -437,7 +461,7 @@ async def send_news():
             t, l, s, summary, p = item[0], item[1], item[2], "", item[3]
 
         # Быстрая проверка — если ссылка уже была отправлена ранее, пропускаем
-        if l in seen_links:
+        if l in state.get("seen", {}):
             logging.debug(f"🔁 Пропускаю уже отправленную ссылку: {l}")
             continue
 
@@ -554,7 +578,8 @@ async def send_news():
                     await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
                 sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
-                seen_links.add(l)
+                mark_state("sent", l)
+                mark_state("seen", l)
                 sent_count += 1
                 logging.info(f"📤 Отправлено: {title_clean[:50]}...")
                 break
@@ -600,10 +625,9 @@ async def send_news():
 
     # Сохраняем список уже отправленных ссылок между перезапусками
     try:
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(seen_links), f, ensure_ascii=False, indent=2)
+        save_state()
     except Exception:
-        logging.warning("⚠️ Не удалось сохранить seen.json")
+        logging.warning("⚠️ Не удалось сохранить state.json")
 
     logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей. Пауза {pause} сек")
     await asyncio.sleep(pause)
@@ -627,10 +651,9 @@ async def main():
             logging.info("🛑 Завершение по Ctrl+C, сохраняем state…")
         finally:
             try:
-                with open(SEEN_FILE, "w", encoding="utf-8") as f:
-                    json.dump(list(seen_links), f, ensure_ascii=False, indent=2)
+                save_state()
             except Exception as e:
-                logging.warning(f"⚠️ Не удалось сохранить seen.json при выходе: {e}")
+                logging.warning(f"⚠️ Не удалось сохранить state.json при выходе: {e}")
 
 if __name__ == "__main__":
     print("🚀 Запуск бота...", flush=True)
