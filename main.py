@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
-from article_parser import extract_article_text
+from article_parser import extract_article_text, PARSER_TEXT_LIMIT
 
 # ---- dedup seen links across restarts ----
 SEEN_FILE = "seen.json"
@@ -499,4 +499,6 @@ if __name__ == "__main__":
 
     print("🚀 Запуск бота...", flush=True)
     logging.info("🚀 Логгер инициализирован")
+    logging.info(f"💬 MODEL_MAX_TOKENS = {MODEL_MAX_TOKENS}")
+    logging.info(f"📰 PARSER_TEXT_LIMIT = {PARSER_TEXT_LIMIT}")
     asyncio.run(main())

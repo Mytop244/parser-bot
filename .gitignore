@@ -8,6 +8,7 @@ log/
 # 📰 Локальные данные
 sent_links.json
 news_queue.json
+seen.json
 # 🐍 Python служебное
 __pycache__/
 *.pyc
