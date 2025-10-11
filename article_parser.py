@@ -47,7 +47,7 @@ async def extract_article_text(
     for attempt in range(1, 4):
         try:
             if session is None:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=headers) as s:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as s:
                     async with s.get(url, ssl=ctx) as r:
                         if r.status != 200:
                             logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
@@ -74,13 +74,19 @@ async def extract_article_text(
     if not html or not html.strip():
         return ""
 
-    # ---------- 2. Базовый парсинг <p> ----------
+    # ---------- 2. Базовый парсинг <p> (приоритет <article>) ----------
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "header", "footer", "aside", "form"]):
         tag.decompose()
+    # Сначала пытаемся взять текст из <article>
+    article = soup.find("article")
+    if article:
+        paragraphs = [p.get_text(" ", strip=True) for p in article.find_all("p")]
+    else:
+        paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
 
-    paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
-    text = clean_text(" ".join(paragraphs))
+    joined = " ".join(paragraphs).strip()
+    text = clean_text(joined)
     if isinstance(text, str) and len(text.split()) >= 50:
         out = text[:max_length]
         return out.rsplit(" ", 1)[0] if " " in out else out
@@ -95,9 +101,10 @@ async def extract_article_text(
         extracted = await loop.run_in_executor(None, partial(trafilatura_extract, html))
         if extracted and len(extracted.split()) >= 30:
             out = clean_text(extracted)[:max_length]
+            logging.info(f"trafilatura OK for {url}, {len(out.split())} words")
             return out.rsplit(" ", 1)[0] if " " in out else out
     except Exception as e:
-        logging.debug(f"trafilatura fail: {e}")
+        logging.info(f"trafilatura fail: {e}")
 
     # ---------- 4. readability (fallback) ----------
     try:
@@ -109,9 +116,10 @@ async def extract_article_text(
         extracted = await loop.run_in_executor(None, partial(readability_extract, html))
         if extracted and len(extracted.split()) >= 30:
             out = clean_text(extracted)[:max_length]
+            logging.info(f"readability OK for {url}, {len(out.split())} words")
             return out.rsplit(" ", 1)[0] if " " in out else out
     except Exception as e:
-        logging.debug(f"readability fail: {e}")
+        logging.info(f"readability fail: {e}")
 
     # ---------- 5. Meta fallback ----------
     meta = (soup.find("meta", attrs={"name": "description"}) or
