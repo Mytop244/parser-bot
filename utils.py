@@ -31,39 +31,64 @@ def safe_get(d: dict, *keys, default=None):
 
 
 import asyncio
+import re
 from html import escape
+from telegram import Bot
 
-async def send_long_message(bot, chat_id: int, text: str, parse_mode="HTML", delay: float = 0.5):
+HTML_SAFE_LIMIT = 4096  # Telegram limit
+
+async def send_long_message(bot: Bot, chat_id: int, text: str, parse_mode="HTML", delay: int = 1):
     """
-    Отправляет длинный текст в Telegram, разбивая на части ≤ 4096 символов.
-    - bot: экземпляр telegram.Bot
-    - chat_id: id чата
-    - text: текст для отправки
-    - parse_mode: режим (HTML или Markdown)
-    - delay: пауза между частями
+    Разбивает длинный текст на безопасные части для Telegram и отправляет их.
+    Сохраняет HTML-разметку и ссылки.
     """
-    MAX_LEN = 4096
-
-    # Экранируем текст если parse_mode=HTML
-    if parse_mode and parse_mode.upper() == "HTML":
-        text = escape(text)
-
+    # Разбиваем по абзацам, чтобы минимизировать разрыв тегов
+    paragraphs = text.split("\n")
     parts = []
-    while len(text) > MAX_LEN:
-        split_pos = text.rfind('\n', 0, MAX_LEN)
-        if split_pos == -1:
-            split_pos = text.rfind(' ', 0, MAX_LEN)
-        if split_pos == -1:
-            split_pos = MAX_LEN
-        parts.append(text[:split_pos].strip())
-        text = text[split_pos:].strip()
+    current = ""
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        # Если добавление нового абзаца не превышает лимит — добавляем
+        if len(current) + len(para) + 1 < HTML_SAFE_LIMIT:
+            current += ("" if not current else "\n") + para
+        else:
+            # Если текущая часть уже есть — добавляем в список
+            if current:
+                parts.append(current)
+            # Если абзац слишком длинный — делим его по предложениям или пробелам
+            if len(para) >= HTML_SAFE_LIMIT:
+                sub_parts = split_text_safe(para, HTML_SAFE_LIMIT)
+                parts.extend(sub_parts)
+                current = ""
+            else:
+                current = para
+
+    if current:
+        parts.append(current)
+
+    # Отправляем по частям
+    for part in parts:
+        await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
+        await asyncio.sleep(delay)
+
+
+def split_text_safe(text: str, limit: int) -> list[str]:
+    """
+    Безопасно разбивает длинный текст на части ≤ limit, не ломая слова.
+    """
+    parts = []
+    while len(text) > limit:
+        # Ищем последний перенос строки или пробел в пределах лимита
+        pos = text.rfind("\n", 0, limit)
+        if pos == -1:
+            pos = text.rfind(" ", 0, limit)
+        if pos == -1:
+            pos = limit
+        parts.append(text[:pos].strip())
+        text = text[pos:].strip()
     if text:
         parts.append(text)
-
-    for part in parts:
-        # Поддержка как async send_message, так и sync через to_thread
-        if asyncio.iscoroutinefunction(bot.send_message):
-            await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
-        else:
-            await asyncio.to_thread(lambda p=part: bot.send_message(chat_id=chat_id, text=p, parse_mode=parse_mode))
-        await asyncio.sleep(delay)
+    return parts
