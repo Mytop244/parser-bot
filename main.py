@@ -182,7 +182,7 @@ def parse_iso_utc(s):
 # ---------------- Ollama local ----------------
 async def summarize_ollama(text: str):
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
-    prompt = f"Сделай длинное резюме новости:\n{prompt_text}"
+    prompt = f"Не делай вступлений. Сделай резюме новости на русском языке:\n{prompt_text}"
     logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt_text[:5500]}")
     async def run_model(model_name: str):
         url = "http://127.0.0.1:11434/api/generate"
@@ -225,6 +225,9 @@ async def summarize(text, max_tokens=200, retries=3):
     text = clean_text(text)
     # используем весь контент (но не более PARSER_MAX_TEXT_LENGTH)
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
+
+    # --- добавляем явное указание на русский язык и формат результата ---
+    prompt_text = f"Сделай краткое резюме новости на русском языке:\n{prompt_text}"
 
     if not AI_STUDIO_KEY:
         logging.debug(f"🧠 [GEMINI INPUT] {prompt_text[:500]}...")
@@ -464,6 +467,11 @@ async def send_news():
                 import inspect
                 async def send_msg(part_msg):
                     fn = getattr(bot, "send_message", None)
+                    # Печатаем в терминал финальный текст сообщения для отладки
+                    try:
+                        print(part_msg)
+                    except Exception:
+                        pass
                     if inspect.iscoroutinefunction(fn):
                         await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
                     else:

@@ -84,5 +84,10 @@ async def send_long_message(bot: Bot, chat_id: int, text: str, parse_mode="HTML"
         parts.append(current)
 
     for part in parts:
+        # Печатаем в терминал для отладки, затем отправляем
+        try:
+            print(part)
+        except Exception:
+            pass
         await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
         await asyncio.sleep(delay)
