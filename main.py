@@ -116,10 +116,12 @@ model_logger.addHandler(console_handler)
 model_logger.addHandler(file_handler)
 model_logger.propagate = False
 
-# ---------------- SSL CONTEXT ----------------
+# --- Безопасный SSL ---
+SSL_VERIFY = os.getenv("SSL_VERIFY", "1") not in ("0", "false", "False")
 ssl_ctx = ssl.create_default_context()
-ssl_ctx.check_hostname = False
-ssl_ctx.verify_mode = ssl.CERT_NONE
+if not SSL_VERIFY:
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
 
 # ---------------- HELPERS ----------------
 async def fetch_and_check(session, url, head_only=False):
@@ -337,7 +339,20 @@ async def send_news():
             for item in queued:
                 if len(item) == 4:
                     t, l, s, p = item
-                    all_news.append((t, l, s, "", datetime.fromisoformat(p)))
+                    try:
+                        if isinstance(p, str):
+                            try:
+                                p = parse_iso_utc(p)
+                            except Exception:
+                                try:
+                                    p = datetime.fromisoformat(p).replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    p = None
+                        elif isinstance(p, datetime) and p.tzinfo is None:
+                            p = p.replace(tzinfo=timezone.utc)
+                        all_news.append((t, l, s, "", p))
+                    except Exception:
+                        continue
                 elif len(item) == 5:
                     t, l, s, summary, p = item
                     all_news.append((t, l, s, summary, datetime.fromisoformat(p)))
@@ -385,11 +400,14 @@ async def send_news():
             sources[s].append((t, l, s, summary, p))
         src_list = list(sources.keys())
         queue, i = [], last_index
-        while any(sources.values()):
-            s = src_list[i % len(src_list)]
-            if sources[s]:
-                queue.append(sources[s].popleft())
-            i += 1
+        if src_list:
+            while any(sources.values()):
+                s = src_list[i % len(src_list)]
+                if sources[s]:
+                    queue.append(sources[s].popleft())
+                i += 1
+        else:
+            queue = []
         new_items = [n for n in queue if n[1] not in sent_links]
     else:
         # безопасная сортировка даже если p = None
@@ -512,24 +530,27 @@ async def send_news():
 
         # (Проверка на seen_links была поднята выше чтобы избежать лишней работы)
 
+        async def send_and_log(part_msg):
+            import inspect
+            logging.debug(part_msg[:800])  # не спамим полный текст в консоль
+            fn = getattr(bot, "send_message", None)
+            try:
+                if inspect.iscoroutinefunction(fn):
+                    await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+                else:
+                    await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+            except Exception as e:
+                if "429" in str(e):
+                    logging.warning(f"⏳ Rate limited: {e}")
+                    raise
+                else:
+                    logging.exception("❌ Ошибка при отправке сообщения")
+                    raise
+
         for _ in range(3):
             try:
-                # универсальная безопасная отправка (async/sync)
-                import inspect
-                async def send_msg(part_msg):
-                    fn = getattr(bot, "send_message", None)
-                    # Печатаем в терминал финальный текст сообщения для отладки
-                    try:
-                        print(part_msg)
-                    except Exception:
-                        pass
-                    if inspect.iscoroutinefunction(fn):
-                        await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
-                    else:
-                        await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
-
                 for part_msg in assembled_parts:
-                    await send_msg(part_msg)
+                    await send_and_log(part_msg)
                     await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
                 sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
@@ -541,8 +562,8 @@ async def send_news():
                 logging.error(f"❌ Ошибка отправки: {e}")
                 if "429" in str(e):
                     await asyncio.sleep(30)
-        else:
-            await asyncio.sleep(5)
+                else:
+                    await asyncio.sleep(5)
 
         if queue_rest:
             safe_queue = []
