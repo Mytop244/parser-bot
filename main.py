@@ -312,11 +312,11 @@ async def send_news():
             summary_clean = summary_clean[:MAX_SUMMARY_LEN].rsplit(" ", 1)[0] + "…"
 
         text = (
-            f"━━━━━━━━━━━━━━━\n"
-            f"📰 <b>{title_clean}</b>\n"
+            f"<b>{title_clean}</b>\n"
             f"📡 <i>{s}</i> | 🗓 {local_time_str}\n"
             f"━━━━━━━━━━━━━━━\n\n"
             f"💬 {summary_clean}\n\n"
+            f"━━━━━━━━━━━━━━━\n"
             f"🤖 <i>Модель: {used_model}</i>\n"
             f"🔗 <a href=\"{l}\">Читать статью</a>"
         )
