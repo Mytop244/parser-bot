@@ -6,6 +6,7 @@ import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
 from article_parser import extract_article_text
+from utils import send_long_message
 
 # ---- dedup seen links across restarts ----
 SEEN_FILE = "seen.json"
@@ -275,27 +276,8 @@ async def check_sources():
 
 # ---------------- Telegram helper ----------------
 async def send_telegram(text):
-    def split_message(text: str, limit: int = 4000) -> list[str]:
-        parts = []
-        while len(text) > limit:
-            split_pos = text.rfind('\n', 0, limit)
-            if split_pos == -1:
-                split_pos = text.rfind(' ', 0, limit)
-            if split_pos == -1:
-                split_pos = limit
-            parts.append(text[:split_pos].strip())
-            text = text[split_pos:].strip()
-        if text:
-            parts.append(text)
-        return parts
-
-    parts = split_message(text, limit=4000)
-    for part in parts:
-        if asyncio.iscoroutinefunction(bot.send_message):
-            await bot.send_message(chat_id=CHAT_ID, text=part, parse_mode="HTML")
-        else:
-            await asyncio.to_thread(lambda p=part: bot.send_message(chat_id=CHAT_ID, text=p, parse_mode="HTML"))
-        await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
+    # Делегируем разбиение и отправку в utils.send_long_message
+    await send_long_message(bot, CHAT_ID, text, parse_mode="HTML", delay=SINGLE_MESSAGE_PAUSE)
 
 # ---------------- Основная логика ----------------
 async def send_news():
