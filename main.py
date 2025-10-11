@@ -38,6 +38,9 @@ AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
 GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_MODEL_FALLBACK = os.environ.get("OLLAMA_MODEL_FALLBACK", "gpt-oss:120b")
+PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH", os.environ.get("MAX_TEXT_LENGTH", 10000)))
+MAX_TEXT_LENGTH = int(os.getenv("PARSER_MAX_TEXT_LENGTH", 5000))
+MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 500))
 
 # Батчи
 BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
@@ -174,7 +177,7 @@ async def summarize_ollama(text: str):
     logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt}")
     async def run_model(model_name: str):
         url = "http://127.0.0.1:11434/api/generate"
-        payload = {"model": model_name, "prompt": prompt, "stream": False}
+        payload = {"model": model_name, "prompt": prompt, "options": {"num_predict": MODEL_MAX_TOKENS}}
         start_time = time.time()
         try:
             async with aiohttp.ClientSession() as session:
@@ -216,9 +219,10 @@ async def summarize(text, max_tokens=200, retries=3):
 
     text = clean_text(text)
     short_text = ". ".join(text.split(".")[:2])
+    prompt_text = f"Сделай краткое резюме новости:\n{short_text}"
     payload = {
-        "contents": [{"parts": [{"text": f"Сделай краткое резюме новости:\n{short_text}"}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {"maxOutputTokens": MODEL_MAX_TOKENS}
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": AI_STUDIO_KEY, "Content-Type": "application/json"}
@@ -226,7 +230,7 @@ async def summarize(text, max_tokens=200, retries=3):
     backoff = 1
     for attempt in range(1, retries + 1):
         try:
-            logging.info(f"🧠 [GEMINI INPUT] >>> {payload['contents'][0]['parts'][0]['text']}")
+            logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -249,7 +253,7 @@ async def summarize(text, max_tokens=200, retries=3):
                 parts = candidates[0].get("content", {}).get("parts", [])
                 if parts and "text" in parts[0]:
                     text_out = parts[0]["text"]
-                    logging.info(f"✅ Gemini OK ({GEMINI_MODEL}): {text_out[:100]}...")
+                    logging.info(f"✅ Gemini OK ({GEMINI_MODEL}): {text_out}")
                     logging.info(f"🧠 [GEMINI OUTPUT] <<< {text_out}")
                     return text_out.strip(), GEMINI_MODEL
         except Exception as e:
@@ -355,29 +359,38 @@ async def send_news():
     queue_rest = new_items[NEWS_LIMIT or total:]
 
     sent_count = 0
-    # Поддерживаем элементы с summary: (t, l, s, summary, p)
+    # ---------------- Обработка статьи и резюме ----------------
     for item in current_batch:
         if len(item) == 5:
             t, l, s, summary, p = item
         else:
             t, l, s, summary, p = item[0], item[1], item[2], "", item[3]
+
         local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
 
         try:
-            summary = clean_text(summary or "")
-            article_text = await extract_article_text(l, ssl_ctx)
+            # --- Извлекаем текст статьи с ограничением PARSER_MAX_TEXT_LENGTH ---
+            article_text = await extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH)
         except Exception as e:
             logging.warning(f"extract_article_text error for {l}: {e}")
             article_text = None
 
+        # --- Подготавливаем контент для модели ---
         if not article_text or len(article_text) < 300:
-            content = f"{t}\n{summary or ''}\n{article_text}"
+            # Если текста мало, берем summary или title
+            content = f"{summary or t}"
         else:
             content = article_text
 
+        # --- Усечение контента по PARSER_MAX_TEXT_LENGTH перед моделью ---
+        content = content[:PARSER_MAX_TEXT_LENGTH]
+        logging.debug(f"📝 Контент для модели ({len(content)} символов): {content}")
+
+        # --- Генерация резюме ---
         summary_text, used_model = await summarize(content)
 
+        # --- Усечение заголовка и резюме ---
         MAX_SUMMARY_LEN = 600
         MAX_TITLE_LEN = 120
         title_clean = t.strip()
@@ -387,6 +400,7 @@ async def send_news():
         if len(summary_clean) > MAX_SUMMARY_LEN:
             summary_clean = summary_clean[:MAX_SUMMARY_LEN].rsplit(" ", 1)[0] + "…"
 
+        # --- Формируем сообщение для Telegram ---
         text = (
             f"<b>{title_clean}</b>\n"
             f"📡 <i>{s}</i> | 🗓 {local_time_str}\n"
