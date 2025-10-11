@@ -42,7 +42,7 @@ PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH",
                                            os.environ.get("MAX_TEXT_LENGTH", "10000")))
 # legacy alias
 MAX_TEXT_LENGTH = PARSER_MAX_TEXT_LENGTH
-MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 500))
+MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 1200))
 
 # Батчи
 BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
@@ -175,9 +175,9 @@ def parse_iso_utc(s):
 
 # ---------------- Ollama local ----------------
 async def summarize_ollama(text: str):
-    short_text = ". ".join(text.split(".")[:3])
-    prompt = f"Сделай длинное резюме новости:\n{short_text}"
-    logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt}")
+    prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
+    prompt = f"Сделай длинное резюме новости:\n{prompt_text}"
+    logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt_text[:5500]}")
     async def run_model(model_name: str):
         url = "http://127.0.0.1:11434/api/generate"
         payload = {"model": model_name, "prompt": prompt, "options": {"num_predict": MODEL_MAX_TOKENS}}
@@ -209,7 +209,8 @@ async def summarize_ollama(text: str):
         result, used_model = await run_model(OLLAMA_MODEL_FALLBACK)
 
     if not result:
-        return short_text[:400] + "...", "local-fallback"
+        # Вернуть начало переданного prompt_text как fallback (увеличено до 2000 символов)
+        return prompt_text[:2000] + "...", "local-fallback"
 
     return result, used_model
 
@@ -274,13 +275,27 @@ async def check_sources():
 
 # ---------------- Telegram helper ----------------
 async def send_telegram(text):
-    try:
+    def split_message(text: str, limit: int = 4000) -> list[str]:
+        parts = []
+        while len(text) > limit:
+            split_pos = text.rfind('\n', 0, limit)
+            if split_pos == -1:
+                split_pos = text.rfind(' ', 0, limit)
+            if split_pos == -1:
+                split_pos = limit
+            parts.append(text[:split_pos].strip())
+            text = text[split_pos:].strip()
+        if text:
+            parts.append(text)
+        return parts
+
+    parts = split_message(text, limit=4000)
+    for part in parts:
         if asyncio.iscoroutinefunction(bot.send_message):
-            await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+            await bot.send_message(chat_id=CHAT_ID, text=part, parse_mode="HTML")
         else:
-            await asyncio.to_thread(lambda: bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML"))
-    except Exception as e:
-        raise e
+            await asyncio.to_thread(lambda p=part: bot.send_message(chat_id=CHAT_ID, text=p, parse_mode="HTML"))
+        await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
 # ---------------- Основная логика ----------------
 async def send_news():
@@ -409,17 +424,38 @@ async def send_news():
         summary_safe = escape(summary_clean)
         link_safe = escape(l, quote=True)
 
-        text = (
-            f"<b>{title_safe}</b>\n"
-            f"📡 <i>{s}</i> | 🗓 {local_time_str}\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"💬 {summary_safe}\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🤖 <i>Модель: {used_model}</i>\n"
-            f"🔗 <a href=\"{link_safe}\">Читать статью</a>"
-        )
-        if len(text) > 4000:
-            text = text[:3997] + "…"
+        # ✅ новый безопасный сплит сообщений: header/body/footer
+        def split_message_simple(text: str, limit: int = 4096) -> list[str]:
+            parts = []
+            while len(text) > limit:
+                pos = text.rfind("\n", 0, limit)
+                if pos == -1:
+                    pos = text.rfind(" ", 0, limit)
+                if pos == -1:
+                    pos = limit
+                parts.append(text[:pos].strip())
+                text = text[pos:].strip()
+            if text:
+                parts.append(text)
+            return parts
+
+        header = f"<b>{title_safe}</b>\n📡 <i>{s}</i> | 🗓 {local_time_str}\n━━━━━━━━━━━━━━━\n"
+        body = f"💬 {summary_safe}"
+        footer = f"\n━━━━━━━━━━━━━━━\n🤖 <i>Модель: {used_model}</i>\n🔗 <a href=\"{link_safe}\">Читать статью</a>"
+
+        # Оставляем резерв в 200 символов на header/footer/markup
+        parts = split_message_simple(body, limit=4096 - 200)
+        assembled_parts = []
+        for i, part in enumerate(parts):
+            if len(parts) == 1:
+                msg = header + part + footer
+            elif i == 0:
+                msg = header + part
+            elif i == len(parts) - 1:
+                msg = part + footer
+            else:
+                msg = part
+            assembled_parts.append(msg)
 
         # Проверяем, отправляли ли уже ссылку ранее (между перезапусками)
         if l in seen_links:
@@ -428,7 +464,14 @@ async def send_news():
 
         for _ in range(3):
             try:
-                await send_telegram(text)
+                # Отправляем все части поочередно; если какая-то часть упадёт — поймаем ошибку
+                for part_msg in assembled_parts:
+                    if asyncio.iscoroutinefunction(bot.send_message):
+                        await bot.send_message(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+                    else:
+                        await asyncio.to_thread(lambda p=part_msg: bot.send_message(chat_id=CHAT_ID, text=p, parse_mode="HTML"))
+                    await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
+
                 sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
                 seen_links.add(l)
                 sent_count += 1
