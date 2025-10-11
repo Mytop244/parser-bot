@@ -314,8 +314,8 @@ async def send_news():
         text = (
             f"<b>{title_clean}</b>\n"
             f"📡 <i>{s}</i> | 🗓 {local_time_str}\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            f"💬 {summary_clean}\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"💬 {summary_clean}\n"
             f"━━━━━━━━━━━━━━━\n"
             f"🤖 <i>Модель: {used_model}</i>\n"
             f"🔗 <a href=\"{l}\">Читать статью</a>"
