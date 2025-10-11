@@ -411,6 +411,11 @@ async def send_news():
         else:
             t, l, s, summary, p = item[0], item[1], item[2], "", item[3]
 
+        # Быстрая проверка — если ссылка уже была отправлена ранее, пропускаем
+        if l in seen_links:
+            logging.debug(f"🔁 Пропускаю уже отправленную ссылку: {l}")
+            continue
+
         local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
 
@@ -487,10 +492,7 @@ async def send_news():
                 msg = part
             assembled_parts.append(msg)
 
-        # Проверяем, отправляли ли уже ссылку ранее (между перезапусками)
-        if l in seen_links:
-            logging.debug(f"🔁 Пропускаю уже отправленную ссылку: {l}")
-            continue
+        # (Проверка на seen_links была поднята выше чтобы избежать лишней работы)
 
         for _ in range(3):
             try:
