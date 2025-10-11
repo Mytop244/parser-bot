@@ -24,3 +24,7 @@ venv/
 .vscode/
 .idea/
 *.swp
+
++# 💻 Системные файлы
++.DS_Store
++Thumbs.db

@@ -88,6 +88,7 @@ formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(formatter)
+file_handler.setLevel(logging.DEBUG)
 
 # --- Терминал (с цветом) ---
 console_handler = logging.StreamHandler(sys.stdout)
@@ -104,6 +105,7 @@ model_logger = logging.getLogger("model")
 model_logger.setLevel(logging.INFO)
 model_logger.addHandler(console_handler)
 model_logger.addHandler(file_handler)
+model_logger.propagate = False
 
 # ---------------- SSL CONTEXT ----------------
 ssl_ctx = ssl.create_default_context()
@@ -111,34 +113,37 @@ ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
 # ---------------- HELPERS ----------------
-async def fetch_and_check(url, head_only=False):
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-        try:
-            if head_only:
-                async with s.head(url, ssl=ssl_ctx) as r:
-                    return url, "✅ OK" if r.status == 200 else f"⚠️ HTTP {r.status}"
-            async with s.get(url, ssl=ssl_ctx) as r:
-                if r.status != 200:
-                    raise Exception(f"HTTP {r.status}")
-                body = await r.text()
-                feed = feedparser.parse(body)
-                news = []
-                for e in feed.entries:
-                    pub = None
-                    if getattr(e, "published_parsed", None):
-                        pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
-                    # Попробуем взять summary/description из записи, если есть
-                    summary = e.get("summary", "") or e.get("description", "") or ""
-                    news.append((
-                        e.get("title", "Без заголовка").strip(),
-                        e.get("link", "").strip(),
-                        feed.feed.get("title", "Неизвестный источник").strip(),
-                        summary,
-                        pub
-                    ))
-                return news
-        except Exception as e:
-            return (url, f"❌ {e.__class__.__name__}") if head_only else []
+async def fetch_and_check(session, url, head_only=False):
+    """Асинхронная загрузка RSS: HEAD или GET, с fallback."""
+    try:
+        if head_only:
+            async with session.head(url, ssl=ssl_ctx) as r:
+                if r.status == 405:  # fallback
+                    async with session.get(url, ssl=ssl_ctx) as r2:
+                        return url, "✅ OK" if r2.status == 200 else f"⚠️ HTTP {r2.status}"
+                return url, "✅ OK" if r.status == 200 else f"⚠️ HTTP {r.status}"
+
+        async with session.get(url, ssl=ssl_ctx) as r:
+            if r.status != 200:
+                raise Exception(f"HTTP {r.status}")
+            body = await r.text()
+            feed = feedparser.parse(body)
+            news = []
+            for e in feed.entries:
+                pub = None
+                if getattr(e, "published_parsed", None):
+                    pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
+                summary = e.get("summary", "") or e.get("description", "") or ""
+                news.append((
+                    e.get("title", "Без заголовка").strip(),
+                    e.get("link", "").strip(),
+                    feed.feed.get("title", "Неизвестный источник").strip(),
+                    summary,
+                    pub
+                ))
+            return news
+    except Exception as e:
+        return (url, f"❌ {e.__class__.__name__}") if head_only else []
 
 def clean_text(text: str) -> str:
     try:
@@ -269,7 +274,8 @@ async def summarize(text, max_tokens=200, retries=3):
 
 # ---------------- Проверка источников ----------------
 async def check_sources():
-    results = await asyncio.gather(*[fetch_and_check(url, head_only=True) for url in RSS_URLS])
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        results = await asyncio.gather(*[fetch_and_check(session, url, head_only=True) for url in RSS_URLS])
     logging.info("🔍 Проверка источников:")
     for u, s in results:
         logging.info(f"  {s} — {u}")
@@ -298,7 +304,8 @@ async def send_news():
         except Exception:
             pass
 
-    results = await asyncio.gather(*[fetch_and_check(url) for url in RSS_URLS])
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        results = await asyncio.gather(*[fetch_and_check(session, url) for url in RSS_URLS])
     for r in results:
         # `r` может быть либо [] при ошибке, либо список кортежей из fetch_and_check
         # Убедимся, что элементы имеют 5 элементов (t, l, s, summary, pub)
@@ -344,9 +351,12 @@ async def send_news():
             i += 1
         new_items = [n for n in queue if n[1] not in sent_links]
     else:
-        # all_news items have format (t, l, s, summary, p) — используем индекс 4 для даты
-        new_items = [n for n in sorted(all_news, key=lambda x: x[4], reverse=True)
-                     if n[1] not in sent_links]
+        # безопасная сортировка даже если p = None
+        MIN_DT = datetime.fromtimestamp(0, tz=timezone.utc)
+        new_items = [
+            n for n in sorted(all_news, key=lambda x: x[4] or MIN_DT, reverse=True)
+            if n[1] not in sent_links
+        ]
 
     total = len(new_items)
     if total <= BATCH_SIZE_SMALL:
@@ -371,8 +381,12 @@ async def send_news():
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
 
         try:
-            # --- Извлекаем текст статьи с ограничением PARSER_MAX_TEXT_LENGTH ---
-            article_text = await extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH)
+            # --- Извлекаем текст статьи безопасно ---
+            import inspect
+            if inspect.iscoroutinefunction(extract_article_text):
+                article_text = await extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH)
+            else:
+                article_text = await asyncio.to_thread(extract_article_text, l, ssl_ctx, PARSER_MAX_TEXT_LENGTH)
         except Exception as e:
             logging.warning(f"extract_article_text error for {l}: {e}")
             article_text = None
@@ -446,12 +460,17 @@ async def send_news():
 
         for _ in range(3):
             try:
-                # Отправляем все части поочередно; если какая-то часть упадёт — поймаем ошибку
-                for part_msg in assembled_parts:
-                    if asyncio.iscoroutinefunction(bot.send_message):
-                        await bot.send_message(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+                # универсальная безопасная отправка (async/sync)
+                import inspect
+                async def send_msg(part_msg):
+                    fn = getattr(bot, "send_message", None)
+                    if inspect.iscoroutinefunction(fn):
+                        await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
                     else:
-                        await asyncio.to_thread(lambda p=part_msg: bot.send_message(chat_id=CHAT_ID, text=p, parse_mode="HTML"))
+                        await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+
+                for part_msg in assembled_parts:
+                    await send_msg(part_msg)
                     await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
                 sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
@@ -512,16 +531,26 @@ async def send_news():
 # ---------------- MAIN LOOP ----------------
 async def main():
     last_check = datetime.now(timezone.utc)
-    while True:
-        now = datetime.now(timezone.utc)
-        if (now - last_check) > timedelta(days=1):
-            await check_sources()
-            last_check = now
-        logging.info("🔄 Проверка новостей...")
-        await send_news()
-        logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин\n")
-        print("💤 цикл завершён, жду следующий", flush=True)
-        await asyncio.sleep(INTERVAL)
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        try:
+            while True:
+                now = datetime.now(timezone.utc)
+                if (now - last_check) > timedelta(days=1):
+                    await check_sources()
+                    last_check = now
+                logging.info("🔄 Проверка новостей...")
+                await send_news()
+                logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин\n")
+                print("💤 цикл завершён, жду следующий", flush=True)
+                await asyncio.sleep(INTERVAL)
+        except KeyboardInterrupt:
+            logging.info("🛑 Завершение по Ctrl+C, сохраняем state…")
+        finally:
+            try:
+                with open(SEEN_FILE, "w", encoding="utf-8") as f:
+                    json.dump(list(seen_links), f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logging.warning(f"⚠️ Не удалось сохранить seen.json при выходе: {e}")
 
 if __name__ == "__main__":
     print("🚀 Запуск бота...", flush=True)
