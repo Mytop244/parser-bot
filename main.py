@@ -176,7 +176,7 @@ def parse_iso_utc(s):
 # ---------------- Ollama local ----------------
 async def summarize_ollama(text: str):
     short_text = ". ".join(text.split(".")[:3])
-    prompt = f"Сделай краткое резюме новости:\n{short_text}"
+    prompt = f"Сделай длинное резюме новости:\n{short_text}"
     logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt}")
     async def run_model(model_name: str):
         url = "http://127.0.0.1:11434/api/generate"
@@ -216,16 +216,17 @@ async def summarize_ollama(text: str):
 # ---------------- Gemini ----------------
 async def summarize(text, max_tokens=200, retries=3):
     text = clean_text(text)
-    short_text = ". ".join(text.split(".")[:2])
+    # используем весь контент (но не более PARSER_MAX_TEXT_LENGTH)
+    prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
 
     if not AI_STUDIO_KEY:
-        logging.debug(f"🧠 [GEMINI INPUT] {short_text[:500]}...")
+        logging.debug(f"🧠 [GEMINI INPUT] {prompt_text[:500]}...")
         logging.warning("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
         return await summarize_ollama(text)
-    prompt_text = f"Сделай краткое резюме новости:\n{short_text}"
+
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"maxOutputTokens": MODEL_MAX_TOKENS}
+        "generationConfig": {"maxOutputTokens": max_tokens or MODEL_MAX_TOKENS}
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": AI_STUDIO_KEY, "Content-Type": "application/json"}
@@ -233,7 +234,7 @@ async def summarize(text, max_tokens=200, retries=3):
     backoff = 1
     for attempt in range(1, retries + 1):
         try:
-            logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text}")
+            logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -390,11 +391,11 @@ async def send_news():
         content = content[:PARSER_MAX_TEXT_LENGTH]
         logging.debug(f"📝 Контент для модели ({len(content)} символов): {content}")
 
-        # --- Генерация резюме ---
-        summary_text, used_model = await summarize(content)
+        # --- Генерация ---
+        summary_text, used_model = await summarize(content, max_tokens=MODEL_MAX_TOKENS)
 
         # --- Усечение заголовка и резюме ---
-        MAX_SUMMARY_LEN = 600
+        MAX_SUMMARY_LEN = 1200
         MAX_TITLE_LEN = 120
         title_clean = t.strip()
         if len(title_clean) > MAX_TITLE_LEN:
