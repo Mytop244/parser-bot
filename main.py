@@ -401,19 +401,20 @@ async def send_news():
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
 
-    try:
-        with open(SENT_LINKS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        sent_links = data.get("links", {})
-        last_index = data.get("last_source_index", 0)
-    except Exception:
-        sent_links, last_index = {}, 0
+    # Используем единое хранилище state для sent links
+    sent_links = state.get("sent", {})
+    last_index = state.get("meta", {}).get("last_source_index", 0)
 
     clean_sent = {}
+    cutoff_ts = cutoff.timestamp()
     for k, v in sent_links.items():
         try:
-            if parse_iso_utc(v) >= cutoff:
-                clean_sent[k] = v
+            if isinstance(v, (int, float)):
+                if v >= cutoff_ts:
+                    clean_sent[k] = v
+            else:
+                if parse_iso_utc(v) >= cutoff:
+                    clean_sent[k] = v
         except Exception:
             continue
     sent_links = clean_sent
@@ -577,7 +578,6 @@ async def send_news():
                     await send_and_log(part_msg)
                     await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
-                sent_links[l] = (p or datetime.now(timezone.utc)).isoformat()
                 mark_state("sent", l)
                 mark_state("seen", l)
                 sent_count += 1
@@ -615,13 +615,13 @@ async def send_news():
                 json.dump(safe_queue, f, ensure_ascii=False, indent=2)
 
           
-    save = {"links": sent_links}
+    # Сохраняем обновлённый state (sent + last_source_index)
+    state.setdefault("sent", {})
+    state["sent"].update(sent_links)
     if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list:
-        save["last_source_index"] = (last_index + sent_count) % len(src_list)
-    tmp = SENT_LINKS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(save, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, SENT_LINKS_FILE)
+        state.setdefault("meta", {})
+        state["meta"]["last_source_index"] = (last_index + sent_count) % len(src_list)
+    save_state()
 
     # Сохраняем список уже отправленных ссылок между перезапусками
     try:
