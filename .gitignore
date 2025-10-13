@@ -9,6 +9,7 @@ log/
 sent_links.json
 news_queue.json
 seen.json
+state.json
 # 🐍 Python служебное
 __pycache__/
 *.pyc
