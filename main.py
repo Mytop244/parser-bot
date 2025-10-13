@@ -8,9 +8,64 @@ from bs4 import BeautifulSoup
 from article_parser import extract_article_text
 from utils import send_long_message
 
-# ---- unified persistent state with cleanup ----
+# ---- load env early, миграция старых файлов ----
+load_dotenv()
+
+# Переносим legacy файлов в единый state.json если они есть
+LEGACY_SEEN = "seen.json"
+LEGACY_SENT = "sent_links.json"
+
 STATE_FILE = "state.json"
-STATE_DAYS_LIMIT = int(os.getenv("STATE_DAYS_LIMIT", 3))  # хранить ссылки не старше N дней
+# STATE_DAYS_LIMIT нужно брать _после_ load_dotenv
+STATE_DAYS_LIMIT = int(os.getenv("STATE_DAYS_LIMIT", "3"))
+
+def migrate_legacy_files():
+    migrated = False
+    state_local = {"seen": {}, "sent": {}}
+    # load existing state if any
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                state_local["seen"] = data.get("seen", {}) or {}
+                state_local["sent"] = data.get("sent", {}) or {}
+        except Exception:
+            pass
+
+    # merge seen.json
+    if os.path.exists(LEGACY_SEEN):
+        try:
+            with open(LEGACY_SEEN, "r", encoding="utf-8") as f:
+                s = json.load(f)
+                if isinstance(s, dict):
+                    state_local["seen"].update(s)
+            os.remove(LEGACY_SEEN)
+            migrated = True
+        except Exception:
+            logging.warning("Не удалось мигрировать seen.json")
+
+    # merge sent_links.json
+    if os.path.exists(LEGACY_SENT):
+        try:
+            with open(LEGACY_SENT, "r", encoding="utf-8") as f:
+                s = json.load(f)
+                if isinstance(s, dict):
+                    state_local["sent"].update(s)
+            os.remove(LEGACY_SENT)
+            migrated = True
+        except Exception:
+            logging.warning("Не удалось мигрировать sent_links.json")
+
+    if migrated:
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state_local, f, ensure_ascii=False, indent=2)
+            logging.info("✅ Миграция legacy файлов в state.json выполнена")
+        except Exception:
+            logging.warning("⚠️ Не удалось записать state.json при миграции")
+
+# Вызов миграции прямо при старте
+migrate_legacy_files()
 
 # state stores timestamps (epoch seconds) for seen and sent links
 state = {"seen": {}, "sent": {}}
@@ -52,7 +107,14 @@ else:
     logging.info("⏰ Windows: пропускаем установку TZ (tzset недоступен)")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = int(os.environ.get("CHAT_ID", 0))
+# Безопасный разбор CHAT_ID: сначала читаем как строку, затем пытаемся привести к int.
+raw_chat = os.environ.get("CHAT_ID")
+CHAT_ID = None
+if raw_chat is not None and raw_chat != "":
+    try:
+        CHAT_ID = int(raw_chat)
+    except Exception:
+        sys.exit("❌ CHAT_ID должен быть целым числом")
 RSS_URLS = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
