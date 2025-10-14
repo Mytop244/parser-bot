@@ -118,7 +118,7 @@ if raw_chat is not None and raw_chat != "":
 RSS_URLS = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
-SENT_LINKS_FILE = os.environ.get("SENT_LINKS_FILE", "sent_links.json")
+SENT_LINKS_FILE = STATE_FILE
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
 AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
@@ -350,7 +350,7 @@ async def summarize(text, max_tokens=200, retries=3):
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
 
     # --- добавляем явное указание на русский язык и формат результата ---
-    prompt_text = f"Сделай профессиональное краткое резюме новости на русском языке, без вступления:\n{prompt_text}"
+    prompt_text = f"Сделай профессиональное краткое резюме новости на русском языке, без вступления, дели на абзацы:\n{prompt_text}"
 
     if not AI_STUDIO_KEY:
         logging.debug(f"🧠 [GEMINI INPUT] {prompt_text[:500]}...")
