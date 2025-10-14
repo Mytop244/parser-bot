@@ -156,6 +156,11 @@ if not RSS_URLS:
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
+PARSE_MODE = os.getenv("PARSE_MODE", "HTML")
+
+async def send(chat_id, text):
+    await bot.send_message(chat_id=chat_id, text=text, parse_mode=PARSE_MODE)
+
 # ---------------- LOG ----------------
 
 LOG_FILE = "parser.log"
