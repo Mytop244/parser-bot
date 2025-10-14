@@ -43,6 +43,9 @@ def safe_get(d: dict, *keys, default=None):
 
 HTML_SAFE_LIMIT = 4096  # Telegram limit
 
+# Кэш разбиения текста: ускоряет повторные отправки одинаковых сообщений
+_cache = {}
+
 
 def split_text_safe(text: str, limit: int) -> list[str]:
     """Безопасно разбивает длинный текст на части ≤ limit, не ломая слова."""
@@ -61,33 +64,42 @@ def split_text_safe(text: str, limit: int) -> list[str]:
 
 
 async def send_long_message(bot: Bot, chat_id: int, text: str, parse_mode="HTML", delay: int = 1):
-    """Отправляет длинный текст в Telegram частями, сохраняя HTML-разметку."""
-    paragraphs = text.split("\n")
-    parts, current = [], ""
+    """Отправляет длинный текст в Telegram частями, сохраняя HTML-разметку.
 
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        if len(current) + len(para) + 1 < HTML_SAFE_LIMIT:
-            current += ("" if not current else "\n") + para
-        else:
-            if current:
-                parts.append(current)
-            if len(para) >= HTML_SAFE_LIMIT:
-                parts.extend(split_text_safe(para, HTML_SAFE_LIMIT))
-                current = ""
+    Использует `_cache` для повторных вызовов с тем же текстом.
+    """
+    if text in _cache:
+        parts = _cache[text]
+    else:
+        paragraphs = text.split("\n")
+        parts, current = [], ""
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            if len(current) + len(para) + 1 < HTML_SAFE_LIMIT:
+                current += ("" if not current else "\n") + para
             else:
-                current = para
-
-    if current:
-        parts.append(current)
+                if current:
+                    parts.append(current)
+                if len(para) >= HTML_SAFE_LIMIT:
+                    parts.extend(split_text_safe(para, HTML_SAFE_LIMIT))
+                    current = ""
+                else:
+                    current = para
+        if current:
+            parts.append(current)
+        _cache[text] = parts
 
     for part in parts:
         # Печатаем в терминал для отладки, затем отправляем
         try:
-            print(part)
+            logging.info(short_preview(part))
         except Exception:
             pass
-        await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
+        try:
+            await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
+        except Exception as e:
+            logging.error(f"Ошибка при отправке сообщения: {e}")
         await asyncio.sleep(delay)

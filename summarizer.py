@@ -1,8 +1,28 @@
-import time, json, logging, asyncio, aiohttp, random, atexit
+import time, json, logging, asyncio, aiohttp, random, atexit, re
 from datetime import timezone
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 load_dotenv()
+
+
+def make_summarizer_prompt(article_text: str, language: str = "русский", max_tokens: int = 500) -> str:
+    """
+    Генерирует корректный prompt для модели.
+    Задаёт стиль, структуру абзацев и ограничения по длине.
+    """
+    clean_text = article_text.replace("\n\n", "\n").strip()
+    prompt = f"""
+Сделай профессиональное краткое резюме новости на {language} языке.
+- Без вступления и общих фраз.
+- Чёткие абзацы по смыслу.
+- Не повторяй названия магазинов или брендов без необходимости.
+- Длина резюме ≈ {max_tokens} токенов.
+- Сохраняй основные факты, цифры и рейтинги.
+
+Текст статьи для анализа:
+{clean_text}
+"""
+    return prompt.strip()
 
 # ---------------- ПАРАМЕТРЫ ----------------
 try:
@@ -26,11 +46,17 @@ except Exception:
 
 
 # ---------------- СЕССИЯ (улучшение 1) ----------------
-_AIO_CONN = aiohttp.TCPConnector(limit=10)
-_session = aiohttp.ClientSession(connector=_AIO_CONN)
+_AIO_CONN = None
+_session = None
 
 def get_session():
+    global _AIO_CONN, _session
+    if _AIO_CONN is None:
+        _AIO_CONN = aiohttp.TCPConnector(limit=10)
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession(connector=_AIO_CONN)
     return _session
+
 
 @atexit.register
 def _close_session():
@@ -71,7 +97,7 @@ async def summarize_ollama(text: str):
         return _cache[text], "cache"
 
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
-    prompt = f"Не делай вступлений. Сделай резюме новости на русском языке:\n{prompt_text}"
+    prompt = make_summarizer_prompt(prompt_text, language="русский", max_tokens=MODEL_MAX_TOKENS)
     logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt_text[:5500]}")
 
     async def run_model(model_name: str):
@@ -145,17 +171,26 @@ async def summarize_ollama(text: str):
 
 # ---------------- GEMINI ----------------
 async def summarize(text, max_tokens=200, retries=3):
-    text = BeautifulSoup(text, "html.parser").get_text() if text and "<" in text else (text or "")
+    # Выбираем значимые параграфы из HTML перед отправкой в модель
+    def extract_relevant_paragraphs(html_text: str, max_paras: int = 6, min_len: int = 80) -> str:
+        """Выбирает первые значимые параграфы статьи для модели."""
+        if not html_text or "<" not in html_text:
+            return html_text or ""
+        soup = BeautifulSoup(html_text, "html.parser")
+        paras = [p.get_text().strip() for p in soup.find_all("p") if len(p.get_text().strip()) >= min_len]
+        return "\n\n".join(paras[:max_paras])
+
+    text = extract_relevant_paragraphs(text)
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
-    prompt_text = f"Сделай профессиональное краткое резюме новости на русском языке, без вступления, дели на абзацы:\n{prompt_text}"
+    prompt = make_summarizer_prompt(prompt_text, language="русский", max_tokens=max_tokens)
 
     if not AI_STUDIO_KEY:
-        logging.debug(f"🧠 [GEMINI INPUT] {prompt_text[:500]}...")
+        logging.debug(f"🧠 [GEMINI INPUT] {prompt[:500]}...")
         logging.warning("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
         return await summarize_ollama(text)
 
     payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": max_tokens or MODEL_MAX_TOKENS},
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
