@@ -183,7 +183,7 @@ formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(formatter)
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.ERROR)
 
 # --- Терминал (с цветом) ---
 console_handler = logging.StreamHandler(sys.stdout)
