@@ -7,6 +7,7 @@ from telegram import Bot
 from bs4 import BeautifulSoup
 from article_parser import extract_article_text
 from utils import send_long_message
+from summarizer import summarize, summarize_ollama
 
 # ---- load env early, миграция старых файлов ----
 load_dotenv()
@@ -95,22 +96,23 @@ async def _ensure_lock():
 
 
 async def save_state_async():
-    """Асинхронное и атомарное сохранение state.json"""
+    """Асинхронное сохранение state.json используя aiofiles (не блокирует event-loop).
+
+    Пишем во временный файл, затем атомарно заменяем целевой.
+    """
+    import aiofiles
     lock = await _ensure_lock()
     async with lock:
         cleanup_state()
-        fd = None
         tmp_path = None
         try:
+            # создаём временный файл в той же директории
             fd, tmp_path = tempfile.mkstemp(prefix="state_", suffix=".json", dir=".")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    # fsync may not be available on some platforms; ignore if it fails
-                    pass
+            os.close(fd)
+            async with aiofiles.open(tmp_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(state, ensure_ascii=False, indent=2))
+                # aiofiles не даёт fsync напрямую; закрытие файла выполнит запись в ОС
+            # атомарная замена
             os.replace(tmp_path, STATE_FILE)
             tmp_path = None
         except Exception:
@@ -748,7 +750,13 @@ async def main():
                     await check_sources()
                     last_check = now
                 logging.info("🔄 Проверка новостей...")
-                await send_news()
+                try:
+                    # ограничиваем выполнение send_news до INTERVAL секунд чтобы не блокировать цикл
+                    await asyncio.wait_for(send_news(), timeout=INTERVAL)
+                except asyncio.TimeoutError:
+                    logging.warning("⏰ send_news превысил лимит времени и был прерван")
+                except Exception as e:
+                    logging.exception(f"❌ Ошибка в send_news: {e}")
                 logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин\n")
                 print("💤 цикл завершён, жду следующий", flush=True)
                 await asyncio.sleep(INTERVAL)
