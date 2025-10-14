@@ -1,4 +1,4 @@
-import os, sys, json, time, asyncio, ssl, logging, subprocess, calendar
+import os, sys, json, time, asyncio, ssl, logging, subprocess, calendar,tempfile
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dotenv import load_dotenv
@@ -85,21 +85,58 @@ def cleanup_state():
     for k in ("seen", "sent"):
         state[k] = {url: ts for url, ts in state.get(k, {}).items() if ts >= cutoff}
 
-def save_state():
-    cleanup_state()
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception:
-        logging.exception("Не удалось сохранить state.json")
+_state_lock = None  # создаётся лениво
+
+async def _ensure_lock():
+    global _state_lock
+    if _state_lock is None:
+        _state_lock = asyncio.Lock()
+    return _state_lock
+
+
+async def save_state_async():
+    """Асинхронное и атомарное сохранение state.json"""
+    lock = await _ensure_lock()
+    async with lock:
+        cleanup_state()
+        fd = None
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="state_", suffix=".json", dir=".")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    # fsync may not be available on some platforms; ignore if it fails
+                    pass
+            os.replace(tmp_path, STATE_FILE)
+            tmp_path = None
+        except Exception:
+            logging.exception("Не удалось сохранить state.json")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
 def mark_state(key, url):
+    # синхронный API остаётся, но делегируем ассинхронной записи
     state.setdefault(key, {})
     state[key][url] = int(time.time())
-    save_state()
+    # запускаем сохранение в фоновом таске (без блокировки главного цикла)
+    try:
+        asyncio.create_task(save_state_async())
+    except RuntimeError:
+        # если вне event loop — делаем синхронно
+        import threading
+        def _sync_save(): asyncio.run(save_state_async())
+        threading.Thread(target=_sync_save, daemon=True).start()
+
 
 # ---------------- ENV ----------------
-load_dotenv()
 if hasattr(time, "tzset"):
     os.environ["TZ"] = os.environ.get("TIMEZONE", "UTC")
     time.tzset()
@@ -688,11 +725,12 @@ async def send_news():
     if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list:
         state.setdefault("meta", {})
         state["meta"]["last_source_index"] = (last_index + sent_count) % len(src_list)
-    save_state()
+
 
     # Сохраняем список уже отправленных ссылок между перезапусками
     try:
-        save_state()
+        await save_state_async()
+
     except Exception:
         logging.warning("⚠️ Не удалось сохранить state.json")
 
@@ -718,7 +756,7 @@ async def main():
             logging.info("🛑 Завершение по Ctrl+C, сохраняем state…")
         finally:
             try:
-                save_state()
+                await save_state_async()
             except Exception as e:
                 logging.warning(f"⚠️ Не удалось сохранить state.json при выходе: {e}")
 
