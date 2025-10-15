@@ -200,7 +200,8 @@ bot = Bot(token=TELEGRAM_TOKEN)
 PARSE_MODE = os.getenv("PARSE_MODE", "HTML")
 
 async def send(chat_id, text):
-    await bot.send_message(chat_id=chat_id, text=text, parse_mode=PARSE_MODE)
+    for part in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+        await bot.send_message(chat_id, part, parse_mode=PARSE_MODE)
 
 # ---------------- LOG ----------------
 

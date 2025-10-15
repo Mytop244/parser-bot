@@ -13,12 +13,11 @@ def make_summarizer_prompt(article_text: str, language: str = "русский", 
     clean_text = article_text.replace("\n\n", "\n").strip()
     prompt = f"""
 Напиши очень краткое и чёткое резюме новости на {language} языке.
-- 2-3 абзаца, каждый не больше 2-3 строк
+- дели на 2-3 тематических абзаца
 - Без вступлений и общих фраз
 - Только ключевые факты и главные детали
-- Не перечисляй длинные списки примеров
-- Добавь 1-2 тематических эмодзи в начало текста
-- Обязательно уложись в {max_tokens} токенов
+- Добавь 1-2 эмодзи 
+- Используй {max_tokens} токенов
 - Заканчивай предложение, не обрывай на полуслове
 
 Текст статьи для анализа:
@@ -178,9 +177,12 @@ async def summarize(text, max_tokens=200, retries=3):
         """Выбирает первые значимые параграфы статьи для модели."""
         if not html_text or "<" not in html_text:
             return html_text or ""
+        logging.debug(f"raw html length {len(html_text)}")
         soup = BeautifulSoup(html_text, "html.parser")
         paras = [p.get_text().strip() for p in soup.find_all("p") if len(p.get_text().strip()) >= min_len]
-        return "\n\n".join(paras[:max_paras])
+        joined = "\n\n".join(paras[:max_paras])
+        logging.debug(f"paragraphs found: {len(paras)}; joined length: {len(joined)}")
+        return joined
 
     text = extract_relevant_paragraphs(text)
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
