@@ -1,4 +1,5 @@
-import os, sys, json, time, asyncio, ssl, logging, subprocess, calendar,tempfile
+import os, sys, json, time, asyncio, ssl, logging, subprocess, calendar
+import tempfile
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from datetime import datetime, timedelta, timezone
@@ -61,8 +62,8 @@ def migrate_legacy_files():
 
     if migrated:
         try:
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(state_local, f, ensure_ascii=False, indent=2)
+            # атомарно сохраняем state.json чтобы не повредить при крэше
+            save_state_atomic(state_local, STATE_FILE)
             logging.info("✅ Миграция legacy файлов в state.json выполнена")
         except Exception:
             logging.warning("⚠️ Не удалось записать state.json при миграции")
@@ -127,6 +128,22 @@ async def save_state_async():
                     os.remove(tmp_path)
                 except Exception:
                     pass
+
+
+def save_state_atomic(data, path="state.json"):
+    """Atomically save JSON to `path` by writing to a temp file and os.replace."""
+    fd, tmp = tempfile.mkstemp(prefix="tmp_state_", dir=os.path.dirname(path) or ".")
+    try:
+        os.close(fd)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
 
 def mark_state(key, url):
     # синхронный API остаётся, но делегируем ассинхронной записи
