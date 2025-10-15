@@ -527,7 +527,7 @@ async def send_news():
 
     if ROUND_ROBIN_MODE:
         sources = defaultdict(deque)
-        for t, l, s, summary, p in sorted(all_news, key=lambda x: x[4], reverse=True):
+        for t, l, s, summary, p in sorted(all_news, key=lambda x: x[4] or datetime.min, reverse=True):
             sources[s].append((t, l, s, summary, p))
         src_list = list(sources.keys())
         queue, i = [], last_index
