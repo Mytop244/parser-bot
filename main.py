@@ -298,29 +298,36 @@ def clean_text(text: str) -> str:
 
 from html import escape
 def parse_iso_utc(s):
+    """Парсит дату в timezone-aware UTC datetime"""
     if isinstance(s, datetime):
         return s.astimezone(timezone.utc)
     if not s:
         raise ValueError("empty date")
+
     s = s.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
+
     try:
         dt = datetime.fromisoformat(s)
     except Exception:
-        for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+        dt = None
+        for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M",
+                    "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
             try:
                 dt = datetime.strptime(s, fmt)
                 break
             except ValueError:
-                dt = None
+                continue
         if dt is None:
             raise ValueError(f"Неверный формат даты: {s}")
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
         dt = dt.astimezone(timezone.utc)
     return dt
+
 
 # ---------------- Ollama local ----------------
 async def summarize_ollama(text: str):
@@ -477,7 +484,7 @@ async def send_news():
                                 p = parse_iso_utc(p)
                             except Exception:
                                 try:
-                                    p = datetime.fromisoformat(p).replace(tzinfo=timezone.utc)
+                                    p = parse_iso_utc(p)
                                 except Exception:
                                     p = None
                         elif isinstance(p, datetime) and p.tzinfo is None:
@@ -492,12 +499,12 @@ async def send_news():
                             try:
                                 p_dt = parse_iso_utc(p)
                             except Exception:
-                                try:
-                                    p_dt = datetime.fromisoformat(p).replace(tzinfo=timezone.utc)
-                                except Exception:
-                                    p_dt = None
-                        elif isinstance(p, datetime) and p.tzinfo is None:
-                            p_dt = p.replace(tzinfo=timezone.utc)
+                                p_dt = None
+                        elif isinstance(p, datetime):
+                            if p.tzinfo is None:
+                                p_dt = p.replace(tzinfo=timezone.utc)
+                            else:
+                                p_dt = p.astimezone(timezone.utc)
                     except Exception:
                         p_dt = None
                     all_news.append((t, l, s, summary, p_dt))
@@ -730,7 +737,7 @@ async def send_news():
                 # если p может быть строкой — приводи к iso
                 if isinstance(p, str):
                     try:
-                        p = datetime.fromisoformat(p)
+                        p = parse_iso_utc(p)
                     except Exception:
                         pass
 
