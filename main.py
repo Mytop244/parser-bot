@@ -1,4 +1,6 @@
 import os, sys, json, time, asyncio, ssl, logging, subprocess, calendar,tempfile
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dotenv import load_dotenv
@@ -485,8 +487,24 @@ async def send_news():
                         continue
                 elif len(item) == 5:
                     t, l, s, summary, p = item
-                    all_news.append((t, l, s, summary, datetime.fromisoformat(p)))
-            os.remove("news_queue.json")
+                    try:
+                        if isinstance(p, str):
+                            try:
+                                p_dt = parse_iso_utc(p)
+                            except Exception:
+                                try:
+                                    p_dt = datetime.fromisoformat(p).replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    p_dt = None
+                        elif isinstance(p, datetime) and p.tzinfo is None:
+                            p_dt = p.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        p_dt = None
+                    all_news.append((t, l, s, summary, p_dt))
+            try:
+                os.remove("news_queue.json")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -527,7 +545,9 @@ async def send_news():
 
     if ROUND_ROBIN_MODE:
         sources = defaultdict(deque)
-        for t, l, s, summary, p in sorted(all_news, key=lambda x: x[4] or datetime.min, reverse=True):
+        MIN_DT = datetime.fromtimestamp(0, tz=timezone.utc)
+        for t, l, s, summary, p in sorted(all_news, key=lambda x: x[4] or MIN_DT, reverse=True):
+
             sources[s].append((t, l, s, summary, p))
         src_list = list(sources.keys())
         queue, i = [], last_index
