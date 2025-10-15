@@ -85,6 +85,8 @@ if os.path.exists(STATE_FILE):
 def cleanup_state():
     now = time.time()
     cutoff = now - STATE_DAYS_LIMIT * 86400
+    if "meta" in state:
+        return
     for k in ("seen", "sent"):
         state[k] = {url: ts for url, ts in state.get(k, {}).items() if ts >= cutoff}
 
@@ -131,13 +133,11 @@ def mark_state(key, url):
     state.setdefault(key, {})
     state[key][url] = int(time.time())
     # запускаем сохранение в фоновом таске (без блокировки главного цикла)
-    try:
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
         asyncio.create_task(save_state_async())
-    except RuntimeError:
-        # если вне event loop — делаем синхронно
-        import threading
-        def _sync_save(): asyncio.run(save_state_async())
-        threading.Thread(target=_sync_save, daemon=True).start()
+    else:
+        asyncio.run(save_state_async())
 
 
 # ---------------- ENV ----------------
@@ -229,7 +229,7 @@ formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(formatter)
-file_handler.setLevel(logging.ERROR)
+file_handler.setLevel(logging.INFO)
 
 # --- Терминал (с цветом) ---
 console_handler = logging.StreamHandler(sys.stdout)
@@ -759,6 +759,7 @@ async def send_news():
     # Сохраняем список уже отправленных ссылок между перезапусками
     try:
         await save_state_async()
+        cleanup_state()
 
     except Exception:
         logging.warning("⚠️ Не удалось сохранить state.json")
