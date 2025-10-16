@@ -1,4 +1,4 @@
-import time, json, logging, asyncio, aiohttp, random, atexit, re
+import time, json, logging, asyncio, aiohttp, random, atexit, re, os
 from datetime import timezone
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -33,7 +33,6 @@ try:
         MODEL_MAX_TOKENS,
         OLLAMA_MODEL,
         OLLAMA_MODEL_FALLBACK,
-        AI_STUDIO_KEY,
         GEMINI_MODEL,
     )
 except Exception:
@@ -42,8 +41,10 @@ except Exception:
     MODEL_MAX_TOKENS = 1200
     OLLAMA_MODEL = "gpt-oss:20b"
     OLLAMA_MODEL_FALLBACK = "gpt-oss:120b"
-    AI_STUDIO_KEY = None
     GEMINI_MODEL = "gemini-2.5-flash"
+
+# читаем ключ из окружения после load_dotenv()
+AI_STUDIO_KEY = os.getenv("AI_STUDIO_KEY")
 
 
 # ---------------- СЕССИЯ (улучшение 1) ----------------
