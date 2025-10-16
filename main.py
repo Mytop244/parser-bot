@@ -11,11 +11,6 @@ from bs4 import BeautifulSoup
 from functools import partial
 import re
 
-# -----------------------------------------------------------------
-# Inlined helpers from utils.py and article_parser.py
-# (send_long_message, split_text_safe, extract_article_text)
-# -----------------------------------------------------------------
-
 # ---- small cache and helpers from utils.py ----
 HTML_SAFE_LIMIT = 4096  # Telegram limit
 _cache = {}
