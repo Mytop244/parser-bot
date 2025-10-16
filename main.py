@@ -10,7 +10,8 @@ from telegram import Bot
 from bs4 import BeautifulSoup
 from article_parser import extract_article_text
 from utils import send_long_message
-from summarizer import summarize, summarize_ollama
+# ⚠️ Удалён импорт, чтобы избежать конфликта имён с локальными функция
+# from summarizer import summarize as ext_summarize, summarize_ollama as ext_summarize_ollama
 
 # ---- load env early, миграция старых файлов ----
 load_dotenv()
@@ -24,52 +25,31 @@ STATE_FILE = "state.json"
 STATE_DAYS_LIMIT = int(os.getenv("STATE_DAYS_LIMIT", "3"))
 
 def migrate_legacy_files():
+    """Перенос старых seen/sent файлов в новый state.json"""
     migrated = False
     state_local = {"seen": {}, "sent": {}}
-    # load existing state if any
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                state_local["seen"] = data.get("seen", {}) or {}
-                state_local["sent"] = data.get("sent", {}) or {}
-        except Exception:
-            pass
-
-    # merge seen.json
-    if os.path.exists(LEGACY_SEEN):
-        try:
+    try:
+        if os.path.exists(LEGACY_SEEN):
             with open(LEGACY_SEEN, "r", encoding="utf-8") as f:
-                s = json.load(f)
-                if isinstance(s, dict):
-                    state_local["seen"].update(s)
-            os.remove(LEGACY_SEEN)
+                state_local["seen"] = json.load(f)
             migrated = True
-        except Exception:
-            logging.warning("Не удалось мигрировать seen.json")
-
-    # merge sent_links.json
-    if os.path.exists(LEGACY_SENT):
-        try:
+        if os.path.exists(LEGACY_SENT):
             with open(LEGACY_SENT, "r", encoding="utf-8") as f:
-                s = json.load(f)
-                if isinstance(s, dict):
-                    state_local["sent"].update(s)
-            os.remove(LEGACY_SENT)
+                state_local["sent"] = json.load(f)
             migrated = True
-        except Exception:
-            logging.warning("Не удалось мигрировать sent_links.json")
-
-    if migrated:
-        try:
-            # атомарно сохраняем state.json чтобы не повредить при крэше
-            save_state_atomic(state_local, STATE_FILE)
-            logging.info("✅ Миграция legacy файлов в state.json выполнена")
-        except Exception:
-            logging.warning("⚠️ Не удалось записать state.json при миграции")
-
-# Вызов миграции прямо при старте
-migrate_legacy_files()
+        if migrated:
+            try:
+                save_state_atomic(state_local, STATE_FILE)
+                # Удаляем legacy только после успешной записи
+                if os.path.exists(LEGACY_SEEN): os.remove(LEGACY_SEEN)
+                if os.path.exists(LEGACY_SENT): os.remove(LEGACY_SENT)
+                logging.info("✅ Миграция выполнена")
+            except Exception:
+                logging.exception("⚠️ Ошибка при записи state.json во время миграции")
+        else:
+            logging.info("🟡 Миграция не требуется")
+    except Exception as e:
+        logging.exception(f"Не удалось мигрировать старые файлы: {e}")
 
 # state stores timestamps (epoch seconds) for seen and sent links
 state = {"seen": {}, "sent": {}}
@@ -145,16 +125,32 @@ def save_state_atomic(data, path="state.json"):
             except Exception:
                 pass
 
-def mark_state(key, url):
-    # синхронный API остаётся, но делегируем ассинхронной записи
-    state.setdefault(key, {})
-    state[key][url] = int(time.time())
-    # запускаем сохранение в фоновом таске (без блокировки главного цикла)
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
+def mark_state(kind: str, key: str, value):
+    """Помечает состояние и сохраняет"""
+    if kind not in state:
+        state[kind] = {}
+    state[kind][key] = value
+    # безопасная проверка event loop
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
         asyncio.create_task(save_state_async())
     else:
-        asyncio.run(save_state_async())
+        try:
+            save_state_atomic(state, STATE_FILE)
+        except Exception:
+            try:
+                asyncio.run(save_state_async())
+            except Exception:
+                logging.exception("Не удалось сохранить state при mark_state")
+
+
+# Теперь можно безопасно вызывать миграцию (save_state_atomic уже определён)
+migrate_legacy_files()
 
 
 # ---------------- ENV ----------------
@@ -729,8 +725,9 @@ async def send_news():
                     await send_and_log(part_msg)
                     await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
-                mark_state("sent", l)
-                mark_state("seen", l)
+                ts_now = int(time.time())
+                mark_state("sent", l, ts_now)
+                mark_state("seen", l, ts_now)
                 sent_count += 1
                 logging.info(f"📤 Отправлено: {title_clean[:50]}...")
                 break
