@@ -366,6 +366,12 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 180))
 MAX_TEXT_LENGTH = PARSER_MAX_TEXT_LENGTH
 MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 1200))
 
+# ---------------- Prompt templates (can be overridden in .env)
+GEMINI_PROMPT = os.getenv("GEMINI_PROMPT",
+    "Сделай профессиональное краткое резюме новости на русском языке, без вступления, дели на абзацы:\n{content}")
+OLLAMA_PROMPT = os.getenv("OLLAMA_PROMPT",
+    "Не делай вступлений. Сделай резюме новости на русском языке:\n{content}")
+
 # Модельные лимиты (можно переопределить в .env)
 GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", 500))
 OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", 500))
@@ -390,6 +396,13 @@ if not RSS_URLS:
 bot = Bot(token=TELEGRAM_TOKEN)
 
 PARSE_MODE = os.getenv("PARSE_MODE", "HTML")
+
+# ---------------- Message templates (can be overridden in .env)
+HEADER_TEMPLATE = os.getenv("HEADER_TEMPLATE",
+    "<b>{title}</b>\n📡 <i>{source}</i> | 🗓 {date}\n━━━━━━━━━━━━━━━\n")
+FOOTER_TEMPLATE = os.getenv("FOOTER_TEMPLATE",
+    "\n━━━━━━━━━━━━━━━\n🤖 <i>Модель: {model}</i>\n🔗 <a href=\"{link}\">Читать статью</a>")
+BODY_PREFIX = os.getenv("BODY_PREFIX", "💬 ")
 
 async def send(chat_id, text):
     for part in [text[i:i+4000] for i in range(0, len(text), 4000)]:
@@ -525,7 +538,7 @@ def parse_iso_utc(s):
 # ---------------- Ollama local ----------------
 async def summarize_ollama(text: str):
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
-    prompt = f"Не делай вступлений. Сделай резюме новости на русском языке:\n{prompt_text}"
+    prompt = OLLAMA_PROMPT.format(content=prompt_text)
     logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt_text[:5500]}")
     async def run_model(model_name: str):
         url = "http://127.0.0.1:11434/api/generate"
@@ -596,7 +609,7 @@ async def summarize(text, max_tokens=200, retries=3):
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
 
     # --- добавляем явное указание на русский язык и формат результата ---
-    prompt_text = f"Сделай профессиональное краткое резюме новости на русском языке, без вступления, дели на абзацы:\n{prompt_text}"
+    prompt_text = GEMINI_PROMPT.format(content=prompt_text)
 
     if not AI_STUDIO_KEY:
         logging.debug(f"🧠 [GEMINI INPUT] {prompt_text[:500]}...")
@@ -861,9 +874,9 @@ async def send_news():
                 parts.append(text)
             return parts
 
-        header = f"<b>{title_safe}</b>\n📡 <i>{s}</i> | 🗓 {local_time_str}\n━━━━━━━━━━━━━━━\n"
-        body = f"💬 {summary_safe}"
-        footer = f"\n━━━━━━━━━━━━━━━\n🤖 <i>Модель: {used_model}</i>\n🔗 <a href=\"{link_safe}\">Читать статью</a>"
+        header = HEADER_TEMPLATE.format(title=title_safe, source=s, date=local_time_str)
+        body = f"{BODY_PREFIX}{summary_safe}"
+        footer = FOOTER_TEMPLATE.format(model=used_model, link=link_safe)
 
         # Оставляем резерв в 200 символов на header/footer/markup
         parts = split_message_simple(body, limit=4096 - 200)
