@@ -9,7 +9,7 @@ import aiohttp, feedparser
 from telegram import Bot
 from bs4 import BeautifulSoup
 from functools import partial
-import re
+import re, html
 
 # ---- small cache and helpers from utils.py ----
 HTML_SAFE_LIMIT = 4096  # Telegram limit
@@ -851,12 +851,35 @@ async def send_news():
         if len(title_clean) > MAX_TITLE_LEN:
             title_clean = title_clean[:MAX_TITLE_LEN].rsplit(" ", 1)[0] + "…"
         summary_clean = summary_text.strip()
-        if len(summary_clean) > MAX_SUMMARY_LEN:
-            summary_clean = summary_clean[:MAX_SUMMARY_LEN].rsplit(" ", 1)[0] + "…"
+
+        # --- списки → буллеты ---
+        summary_clean = re.sub(r'(?m)^[\s]*[\*\-\u2013]\s+', '• ', summary_clean)
+        summary_clean = re.sub(r'(?m)^[\s]*[\*\-]{2,}\s*$', '', summary_clean)
+        summary_clean = re.sub(r'(?m)^[\s]*\*\s*', '• ', summary_clean)
+
+        # --- базовое форматирование ---
+        summary_clean = re.sub(r'(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', summary_clean)   # *текст* → курсив
+        summary_clean = re.sub(r'(?<!\*)\*\*(?!\*)([^*\n]+?)(?<!\*)\*\*(?!\*)', r'<b>\1</b>', summary_clean) # **текст** → жирный
+        summary_clean = re.sub(r'__([^_\n]+?)__', r'<u>\1</u>', summary_clean)                               # __текст__ → подчёркнутый
+        summary_clean = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', summary_clean)                           # `код` → код
+        summary_clean = re.sub(r'\[([^\]]+?)\]\((https?://[^\s)]+)\)', r'<a href="\2">\1</a>', summary_clean) # [текст](ссылка)
+
+        # --- очистка ---
+        summary_clean = re.sub(r'[ \t]{2,}', ' ', summary_clean).strip()
+
+        # --- экранирование, кроме разрешённых HTML-тегов ---
+        escaped = html.escape(summary_clean)
+
+        # возвращаем поддерживаемые Telegram-теги
+        for tag in ["b", "i", "u", "code", "a"]:
+            escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
+            escaped = escaped.replace(f"&lt;/{tag}&gt;", f"</{tag}>")
+        # отдельно для href
+        escaped = re.sub(r'&lt;a href=&quot;(https?://[^&]+)&quot;&gt;', r'<a href="\1">', escaped)
 
         # --- Формируем сообщение для Telegram ---
         title_safe = escape(title_clean)
-        summary_safe = escape(summary_clean)
+        summary_safe = escaped
         link_safe = escape(l, quote=True)
 
         # ✅ новый безопасный сплит сообщений: header/body/footer
