@@ -77,7 +77,7 @@ async def extract_article_text(
     session: aiohttp.ClientSession | None = None
 ) -> str:
     """Извлекает текст статьи с ретраями и fallback-экстракторами."""
-    ctx = ssl_context if ssl_context is not None else ssl_ctx
+    ctx = ssl_context if ssl_context is not None else ssl.create_default_context()
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NewsBot/1.0",
@@ -99,7 +99,7 @@ async def extract_article_text(
         except Exception:
             return b"".join(chunks).decode("utf-8", errors="ignore")
 
-    html = ""
+    html_text = ""
     backoff = 1
     for attempt in range(1, 4):
         try:
@@ -108,14 +108,14 @@ async def extract_article_text(
                     async with s.get(url, ssl=ctx) as r:
                         if r.status != 200:
                             logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
-                            return ""
-                        html = await _read_limited(r, MAX_DOWNLOAD)
+                            raise Exception(f"HTTP {r.status}")
+                        html_text = await _read_limited(r, MAX_DOWNLOAD)
             else:
                 async with session.get(url, ssl=ctx, headers=headers) as r:
                     if r.status != 200:
                         logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
-                        return ""
-                    html = await _read_limited(r, MAX_DOWNLOAD)
+                        raise Exception(f"HTTP {r.status}")
+                    html_text = await _read_limited(r, MAX_DOWNLOAD)
             break
         except Exception as e:
             logging.debug(f"load attempt {attempt} failed for {url}: {e}")
@@ -126,11 +126,11 @@ async def extract_article_text(
                 logging.warning(f"⚠️ Ошибка загрузки {url}: {e}")
                 return ""
 
-    if not html.strip():
+    if not html_text.strip():
         logging.warning(f"⚠️ Пустой HTML для {url}")
         return ""
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html_text, "html.parser")
     for tag in soup(["script", "style", "noscript", "header", "footer", "aside", "form"]):
         tag.decompose()
 
@@ -155,7 +155,7 @@ async def extract_article_text(
         import trafilatura
         def trafilatura_extract(html_inner):
             return trafilatura.extract(html_inner, include_comments=False, favor_recall=True)
-        extracted = await loop.run_in_executor(None, partial(trafilatura_extract, html))
+        extracted = await loop.run_in_executor(None, partial(trafilatura_extract, html_text))
         logging.debug(f"🧩 trafilatura length: {len(extracted) if extracted else 0} for {url}")
         if extracted and len(extracted.split()) >= 30:
             out = clean_text(extracted)[:max_length]
@@ -170,7 +170,7 @@ async def extract_article_text(
             doc = Document(html_inner)
             summary_html = doc.summary()
             return BeautifulSoup(summary_html, "html.parser").get_text(" ", strip=True)
-        extracted = await loop.run_in_executor(None, partial(readability_extract, html))
+        extracted = await loop.run_in_executor(None, partial(readability_extract, html_text))
         logging.debug(f"📖 readability length: {len(extracted) if extracted else 0} for {url}")
         if extracted and len(extracted.split()) >= 30:
             out = clean_text(extracted)[:max_length]
@@ -396,6 +396,8 @@ if not RSS_URLS:
 bot = Bot(token=TELEGRAM_TOKEN)
 
 PARSE_MODE = os.getenv("PARSE_MODE", "HTML")
+if PARSE_MODE.lower() != "html":
+    logging.warning("⚠️ PARSE_MODE не HTML — Telegram может игнорировать теги")
 
 # ---------------- Message templates (can be overridden in .env)
 HEADER_TEMPLATE = os.getenv("HEADER_TEMPLATE",
@@ -810,21 +812,24 @@ async def send_news():
 
         try:
             # --- Извлекаем текст статьи безопасно ---
-            import inspect
-            if inspect.iscoroutinefunction(extract_article_text):
-                article_text = await extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH)
-            else:
-                article_text = await asyncio.to_thread(extract_article_text, l, ssl_ctx, PARSER_MAX_TEXT_LENGTH)
+            article_text = await extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH)
         except Exception as e:
             logging.warning(f"extract_article_text error for {l}: {e}")
             article_text = None
 
         # --- Подготавливаем контент для модели ---
-        if not article_text or len(article_text) < 300:
-            # Если текста мало, берем summary или title
-            content = f"{summary or t}"
-        else:
+        def is_text_relevant(title: str, text: str, min_words: int = 3) -> bool:
+            title_words = [w.lower() for w in re.findall(r'\w+', title)]
+            text_lower = text.lower()
+            count = sum(1 for w in title_words if w in text_lower)
+            return count >= min_words
+
+        # Проверка релевантности текста заголовку
+        if article_text and len(article_text) >= 300 and is_text_relevant(t, article_text):
             content = article_text
+        else:
+            logging.warning(f"⚠️ Текст статьи не соответствует заголовку {t}, используем только title")
+            content = t
 
         # --- Усечение контента по PARSER_MAX_TEXT_LENGTH перед моделью ---
         content = content[:PARSER_MAX_TEXT_LENGTH]
@@ -857,9 +862,9 @@ async def send_news():
         summary_clean = re.sub(r'(?m)^[\s]*[\*\-]{2,}\s*$', '', summary_clean)
         summary_clean = re.sub(r'(?m)^[\s]*\*\s*', '• ', summary_clean)
 
-        # --- базовое форматирование ---
-        summary_clean = re.sub(r'(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', summary_clean)   # *текст* → курсив
-        summary_clean = re.sub(r'(?<!\*)\*\*(?!\*)([^*\n]+?)(?<!\*)\*\*(?!\*)', r'<b>\1</b>', summary_clean) # **текст** → жирный
+        # --- базовое форматирование (сначала жирный, потом курсив) ---
+        summary_clean = re.sub(r'\*\*([^\n*]+)\*\*', r'<b>\1</b>', summary_clean)
+        summary_clean = re.sub(r'(?<!\*)\*([^\n*]+?)\*(?!\*)', r'<i>\1</i>', summary_clean)
         summary_clean = re.sub(r'__([^_\n]+?)__', r'<u>\1</u>', summary_clean)                               # __текст__ → подчёркнутый
         summary_clean = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', summary_clean)                           # `код` → код
         summary_clean = re.sub(r'\[([^\]]+?)\]\((https?://[^\s)]+)\)', r'<a href="\2">\1</a>', summary_clean) # [текст](ссылка)
@@ -867,19 +872,33 @@ async def send_news():
         # --- очистка ---
         summary_clean = re.sub(r'[ \t]{2,}', ' ', summary_clean).strip()
 
-        # --- экранирование, кроме разрешённых HTML-тегов ---
-        escaped = html.escape(summary_clean)
+        # --- new safe html sanitization + send ---
+        try:
+            summary_clean = html.unescape(summary_clean)
+        except Exception:
+            pass
 
-        # возвращаем поддерживаемые Telegram-теги
-        for tag in ["b", "i", "u", "code", "a"]:
-            escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
-            escaped = escaped.replace(f"&lt;/{tag}&gt;", f"</{tag}>")
-        # отдельно для href
-        escaped = re.sub(r'&lt;a href=&quot;(https?://[^&]+)&quot;&gt;', r'<a href="\1">', escaped)
+        logging.debug("SANITIZE_PREVIEW: %s", (summary_clean[:300] + "...") if len(summary_clean) > 300 else summary_clean)
+
+        try:
+            import importlib
+            bleach = importlib.import_module('bleach')
+            allowed_tags = ['b', 'i', 'code', 'a', 'pre', 'u']
+            allowed_attrs = {'a': ['href', 'title']}
+            sanitized = bleach.clean(summary_clean, tags=allowed_tags, attributes=allowed_attrs, strip=True)
+        except Exception:
+            tmp = summary_clean
+            tmp = tmp.replace("&nbsp;", " ")
+            tmp = re.sub(r'\[([^\]]+?)\]\((https?://[^\s)]+)\)', r'<a href="\2">\1</a>', tmp)
+            tmp = re.sub(r'&lt;a\s+href=&quot;(https?://[^&quot;]+)&quot;&gt;', r'<a href="\1">', tmp)
+            tmp = re.sub(r'&lt;/a&gt;', r'</a>', tmp)
+            allowed = ('b','i','u','code','pre','a')
+            tmp = re.sub(r'&lt;/?([a-zA-Z0-9]+)[^&]*&gt;', lambda m: f"<{m.group(1)}>" if m.group(1).lower() in allowed else "", tmp)
+            sanitized = tmp
 
         # --- Формируем сообщение для Telegram ---
         title_safe = escape(title_clean)
-        summary_safe = escaped
+        summary_safe = sanitized
         link_safe = escape(l, quote=True)
 
         # ✅ новый безопасный сплит сообщений: header/body/footer
@@ -901,25 +920,63 @@ async def send_news():
         body = f"{BODY_PREFIX}{summary_safe}"
         footer = FOOTER_TEMPLATE.format(model=used_model, link=link_safe)
 
-        # Оставляем резерв в 200 символов на header/footer/markup
-        parts = split_message_simple(body, limit=4096 - 200)
+        # --- new split that preserves html tags ---
+        def split_preserve_tags(text, limit=4096):
+            parts=[]
+            i=0
+            L=len(text)
+            while i < L:
+                j = min(i+limit, L)
+                # avoid cutting inside tag
+                if '<' in text[i:j] and text.rfind('<', i, j) > text.rfind('>', i, j):
+                    gt = text.find('>', j)
+                    if gt != -1 and gt - i <= limit:
+                        j = gt+1
+                    else:
+                        lt = text.rfind('<', i, j)
+                        if lt > i:
+                            j = lt
+                parts.append(text[i:j])
+                i = j
+            return parts
+
+        # --- Split while preserving HTML tags ---
+        def split_html_preserve(text, limit=4096):
+            parts = []
+            i = 0
+            L = len(text)
+            while i < L:
+                j = min(i + limit, L)
+                # не обрезаем внутри тега
+                lt = text.rfind('<', i, j)
+                gt = text.rfind('>', i, j)
+                if lt > gt:
+                    next_gt = text.find('>', j)
+                    if next_gt != -1:
+                        j = next_gt + 1
+                parts.append(text[i:j])
+                i = j
+            return parts
+
+        body_parts = split_html_preserve(body, limit=4096 - 200)
         assembled_parts = []
-        for i, part in enumerate(parts):
-            if len(parts) == 1:
+        for idx, part in enumerate(body_parts):
+            if len(body_parts) == 1:
                 msg = header + part + footer
-            elif i == 0:
+            elif idx == 0:
                 msg = header + part
-            elif i == len(parts) - 1:
+            elif idx == len(body_parts) - 1:
                 msg = part + footer
             else:
                 msg = part
             assembled_parts.append(msg)
+            logging.debug(f"HTML_SPLIT_PART[{idx}] preview: {part[:300]}...")
 
         # (Проверка на seen_links была поднята выше чтобы избежать лишней работы)
 
         async def send_and_log(part_msg):
             import inspect
-            logging.debug(part_msg[:800])  # не спамим полный текст в консоль
+            logging.info("OUTGOING_MSG_PREVIEW: %s", part_msg[:500])
             fn = getattr(bot, "send_message", None)
             try:
                 if inspect.iscoroutinefunction(fn):
@@ -988,9 +1045,8 @@ async def send_news():
 
     # Сохраняем список уже отправленных ссылок между перезапусками
     try:
-        await save_state_async()
         cleanup_state()
-
+        await save_state_async()
     except Exception:
         logging.warning("⚠️ Не удалось сохранить state.json")
 
@@ -1022,13 +1078,18 @@ async def main():
             logging.info("🛑 Завершение по Ctrl+C, сохраняем state…")
         finally:
             try:
+                cleanup_state()
                 await save_state_async()
             except Exception as e:
                 logging.warning(f"⚠️ Не удалось сохранить state.json при выходе: {e}")
 
 if __name__ == "__main__":
     print("🚀 Запуск бота...", flush=True)
-    logging.getLogger().setLevel(logging.DEBUG)
+    # Проверяем наличие обязательных переменных окружения
+    if not TELEGRAM_TOKEN:
+        sys.exit("❌ Переменная TELEGRAM_TOKEN не указана в .env")
+    if not CHAT_ID:
+        sys.exit("❌ CHAT_ID отсутствует или не является числом")
     logging.info(f"💬 MODEL_MAX_TOKENS = {MODEL_MAX_TOKENS}")
     logging.info(f"📰 PARSER_MAX_TEXT_LENGTH = {PARSER_MAX_TEXT_LENGTH}")
     asyncio.run(main())

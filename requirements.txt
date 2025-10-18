@@ -1,8 +1,8 @@
 aiohttp
-beautifulsoup4
 feedparser
+python-telegram-bot
+beautifulsoup4
 readability-lxml
 trafilatura
-python-telegram-bot
-aiofiles
-
+python-dotenv
+bleach
