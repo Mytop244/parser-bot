@@ -348,7 +348,17 @@ if raw_chat is not None and raw_chat != "":
         CHAT_ID = int(raw_chat)
     except Exception:
         sys.exit("❌ CHAT_ID должен быть целым числом")
-RSS_URLS = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
+_env_rss = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
+# prefer rss.txt if present (one URL per line)
+RSS_FILE = os.path.join(os.path.dirname(__file__) or '.', 'rss.txt')
+if os.path.exists(RSS_FILE):
+    try:
+        with open(RSS_FILE, 'r', encoding='utf-8') as f:
+            RSS_URLS = [l.strip() for l in f.readlines() if l.strip() and not l.strip().startswith('#')]
+    except Exception:
+        RSS_URLS = _env_rss
+else:
+    RSS_URLS = _env_rss
 NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 SENT_LINKS_FILE = STATE_FILE
@@ -393,7 +403,14 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
 if not RSS_URLS:
     sys.exit("❌ RSS_URLS не заданы")
 
-bot = Bot(token=TELEGRAM_TOKEN)
+from telegram.request import Request
+req = Request(
+    connect_timeout=15,
+    read_timeout=60,
+    write_timeout=60,
+    con_pool_size=8,
+)
+bot = Bot(token=TELEGRAM_TOKEN, request=req)
 
 PARSE_MODE = os.getenv("PARSE_MODE", "HTML")
 if PARSE_MODE.lower() != "html":
@@ -974,27 +991,31 @@ async def send_news():
 
         # (Проверка на seen_links была поднята выше чтобы избежать лишней работы)
 
-        async def send_and_log(part_msg):
-            import inspect
+        async def send_and_log(fn, CHAT_ID, part_msg):
+            import inspect, telegram
             logging.info("OUTGOING_MSG_PREVIEW: %s", part_msg[:500])
-            fn = getattr(bot, "send_message", None)
-            try:
-                if inspect.iscoroutinefunction(fn):
-                    await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
-                else:
-                    await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
-            except Exception as e:
-                if "429" in str(e):
-                    logging.warning(f"⏳ Rate limited: {e}")
-                    raise
-                else:
-                    logging.exception("❌ Ошибка при отправке сообщения")
-                    raise
+            # retries with exponential backoff for timeouts
+            for attempt in range(3):
+                try:
+                    if inspect.iscoroutinefunction(fn):
+                        await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+                    else:
+                        await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+                    return
+                except telegram.error.TimedOut:
+                    logging.warning(f"⚠️ Retry send ({attempt+1}/3) due to timeout, len={len(part_msg)}")
+                    await asyncio.sleep(3 * (attempt + 1))
+                except Exception as e:
+                    if "429" in str(e):
+                        logging.warning(f"⏳ Rate limited: {e}")
+                        raise
+                    logging.error(f"❌ Unhandled send error: {e}")
+                    break
 
         for _ in range(3):
             try:
                 for part_msg in assembled_parts:
-                    await send_and_log(part_msg)
+                    await send_and_log(getattr(bot, 'send_message', None), CHAT_ID, part_msg)
                     await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
 
                 ts_now = int(time.time())
