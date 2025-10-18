@@ -403,12 +403,11 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
 if not RSS_URLS:
     sys.exit("❌ RSS_URLS не заданы")
 
-from telegram.request import Request
+from telegram.request._httpxrequest import HTTPXRequest as Request
 req = Request(
     connect_timeout=15,
     read_timeout=60,
     write_timeout=60,
-    con_pool_size=8,
 )
 bot = Bot(token=TELEGRAM_TOKEN, request=req)
 
