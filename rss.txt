@@ -50,3 +50,13 @@ https://www.nsf.gov/rss/news.xml
 https://scipost.org/rss/news/  
 https://newatlas.com/science/index.rss  
 https://rss.feedspot.com/sciencenewsdotorg_rss_feeds/  
+https://dev.to/feed  
+https://news.ycombinator.com/rss  
+https://hackaday.com/blog/feed/  
+https://stackoverflow.blog/feed/  
+https://www.reddit.com/r/programming/.rss  
+https://www.smashingmagazine.com/feed/  
+https://css-tricks.com/feed/  
+https://www.sitepoint.com/feed/  
+https://www.freecodecamp.org/news/rss/  
+https://martinfowler.com/feed.atom  
