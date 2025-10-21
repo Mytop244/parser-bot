@@ -991,44 +991,91 @@ async def send_news():
         # (Проверка на seen_links была поднята выше чтобы избежать лишней работы)
 
         async def send_and_log(fn, CHAT_ID, part_msg):
+            """Пытается отправить часть сообщения.
+            Возвращает: "ok" / "rate_limited" / "fail".
+            """
             import inspect, telegram
             logging.info("OUTGOING_MSG_PREVIEW: %s", part_msg[:500])
-            # retries with exponential backoff for timeouts
-            for attempt in range(3):
+            for attempt in range(2):  # уменьшил число локальных попыток — не держим очередь долго
                 try:
                     if inspect.iscoroutinefunction(fn):
                         await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
                     else:
                         await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
-                    return
+                    return "ok"
                 except telegram.error.TimedOut:
-                    logging.warning(f"⚠️ Retry send ({attempt+1}/3) due to timeout, len={len(part_msg)}")
-                    await asyncio.sleep(3 * (attempt + 1))
+                    logging.warning("⚠️ send timeout, retrying quickly")
+                    await asyncio.sleep(1 + attempt)
                 except Exception as e:
-                    if "429" in str(e):
-                        logging.warning(f"⏳ Rate limited: {e}")
-                        raise
-                    logging.error(f"❌ Unhandled send error: {e}")
+                    err = str(e)
+                    logging.error(f"❌ Send error attempt {attempt+1}: {e}")
+                    if "429" in err or "Too Many Requests" in err or getattr(e, "retry_after", None):
+                        logging.warning("⏳ Detected rate limit")
+                        return "rate_limited"
+                    await asyncio.sleep(0.5)
+            return "fail"
+
+        # Попытки отправки — но при проблемной новости: пропускаем её и идём дальше
+        sent_ok = False
+        for attempt_outer in range(2):
+            any_rate_limited = False
+            any_fail = False
+            for part_msg in assembled_parts:
+                res = await send_and_log(getattr(bot, 'send_message', None), CHAT_ID, part_msg)
+                if res == "ok":
+                    await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
+                    continue
+                if res == "rate_limited":
+                    any_rate_limited = True
+                    logging.warning("⏳ Rate limited while sending, will defer this news and continue with others")
+                    break
+                if res == "fail":
+                    any_fail = True
+                    logging.error("❌ Failed to send part, skipping this news for now")
                     break
 
-        for _ in range(3):
-            try:
-                for part_msg in assembled_parts:
-                    await send_and_log(getattr(bot, 'send_message', None), CHAT_ID, part_msg)
-                    await asyncio.sleep(SINGLE_MESSAGE_PAUSE)
-
-                ts_now = int(time.time())
-                mark_state("sent", l, ts_now)
-                mark_state("seen", l, ts_now)
-                sent_count += 1
-                logging.info(f"📤 Отправлено: {title_clean[:50]}...")
+            if any_rate_limited:
+                try:
+                    safe_queue = []
+                    p_iso = (p.isoformat() if hasattr(p, "isoformat") else str(p))
+                    safe_queue.append((t, l, s, summary, p_iso))
+                    for it in queue_rest:
+                        if len(it) == 5:
+                            t2, l2, s2, summary2, p2 = it
+                        elif len(it) == 4:
+                            t2, l2, s2, p2 = it
+                            summary2 = ""
+                        else:
+                            continue
+                        p2_iso = (p2.isoformat() if hasattr(p2, "isoformat") else str(p2))
+                        safe_queue.append((t2, l2, s2, summary2, p2_iso))
+                    with open("news_queue.json", "w", encoding="utf-8") as f:
+                        json.dump(safe_queue, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    logging.exception("Не удалось записать news_queue.json при rate_limit")
                 break
-            except Exception as e:
-                logging.error(f"❌ Ошибка отправки: {e}")
-                if "429" in str(e):
-                    await asyncio.sleep(30)
-                else:
-                    await asyncio.sleep(5)
+
+            if any_fail:
+                logging.info("Пропускаем эту новость (ошибка отправки) и продолжаем без ожиданий")
+                try:
+                    p_iso = (p.isoformat() if hasattr(p, "isoformat") else str(p))
+                    queue_save = [(t, l, s, summary, p_iso)] + queue_rest
+                    with open("news_queue.json", "w", encoding="utf-8") as f:
+                        json.dump(queue_save, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    logging.exception("Не удалось записать news_queue.json при fail")
+                break
+
+            ts_now = int(time.time())
+            mark_state("sent", l, ts_now)
+            mark_state("seen", l, ts_now)
+            sent_count += 1
+            logging.info(f"📤 Отправлено: {title_clean[:50]}...")
+            sent_ok = True
+            break
+
+        if not sent_ok:
+            logging.info("Не удалось отправить новость после попыток — переходим к следующей")
 
         if queue_rest:
             safe_queue = []
@@ -1071,7 +1118,11 @@ async def send_news():
         logging.warning("⚠️ Не удалось сохранить state.json")
 
     logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей. Пауза {pause} сек")
-    await asyncio.sleep(pause)
+    # Если за текущую итерацию не было отправленных новостей — не задерживаемся большими паузами.
+    if sent_count == 0:
+        await asyncio.sleep(max(1, min(5, pause//6)))  # короткая пауза 1-5 сек
+    else:
+        await asyncio.sleep(pause)
 
 # ---------------- MAIN LOOP ----------------
 async def main():
