@@ -1014,7 +1014,7 @@ async def send_news():
                         return "rate_limited"
                     await asyncio.sleep(0.5)
             return "fail"
-
+        
         # Попытки отправки — но при проблемной новости: пропускаем её и идём дальше
         sent_ok = False
         for attempt_outer in range(2):
@@ -1123,7 +1123,8 @@ async def send_news():
         await asyncio.sleep(max(1, min(5, pause//6)))  # короткая пауза 1-5 сек
     else:
         await asyncio.sleep(pause)
-
+        return sent_count
+ # вернуть количество отправленных
 # ---------------- MAIN LOOP ----------------
 async def main():
     last_check = datetime.now(timezone.utc)
@@ -1137,7 +1138,13 @@ async def main():
                 logging.info("🔄 Проверка новостей...")
                 try:
                     # ограничиваем выполнение send_news до INTERVAL секунд чтобы не блокировать цикл
-                    await asyncio.wait_for(send_news(), timeout=INTERVAL)
+                    sent = await asyncio.wait_for(send_news(), timeout=INTERVAL)
+
+                    # если ничего не отправлено — повторяем быстро
+                    if sent == 0:
+                        logging.info("⚡ Нет новых новостей — повторная проверка сразу")
+                        await asyncio.sleep(5)
+                        continue
                 except asyncio.TimeoutError:
                     logging.warning("⏰ send_news превысил лимит времени и был прерван")
                 except Exception as e:
