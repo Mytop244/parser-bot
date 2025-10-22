@@ -17,109 +17,59 @@ _cache = {}
 
 def split_text_safe(text: str, limit: int) -> list[str]:
     parts = []
-    while len(text) > limit:
-        pos = text.rfind("\n", 0, limit)
-        if pos == -1:
-            pos = text.rfind(" ", 0, limit)
-        if pos == -1:
-            pos = limit
+    while text:
+        if len(text) <= limit:
+            parts.append(text.strip())
+            break
+        pos = text[:limit].rfind("\n") or text[:limit].rfind(" ") or limit
         parts.append(text[:pos].strip())
         text = text[pos:].strip()
-    if text:
-        parts.append(text)
     return parts
 
 async def send_long_message(bot, chat_id: int, text: str, parse_mode="HTML", delay: int = 1):
-    """Отправляет длинный текст в Telegram частями, сохраняя HTML-разметку.
+    # Проверяем кэш
+    if text not in _cache:
+        _cache[text] = split_text_safe(text, HTML_SAFE_LIMIT)
 
-    Использует `_cache` для повторных вызовов с тем же текстом.
-    """
-    if text in _cache:
-        parts = _cache[text]
-    else:
-        paragraphs = text.split("\n")
-        parts, current = [], ""
-
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-            if len(current) + len(para) + 1 < HTML_SAFE_LIMIT:
-                current += ("" if not current else "\n") + para
-            else:
-                if current:
-                    parts.append(current)
-                if len(para) >= HTML_SAFE_LIMIT:
-                    parts.extend(split_text_safe(para, HTML_SAFE_LIMIT))
-                    current = ""
-                else:
-                    current = para
-        if current:
-            parts.append(current)
-        _cache[text] = parts
-
-    for part in parts:
-        try:
-            logging.info((part[:120] + "…") if len(part) > 120 else part)
-        except Exception:
-            pass
+    for part in _cache[text]:
+        logging.info(f"📤 Sending part: {part[:120] + '…' if len(part) > 120 else part}")
         try:
             await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
+            await asyncio.sleep(delay)
         except Exception as e:
             logging.error(f"Ошибка при отправке сообщения: {e}")
-        await asyncio.sleep(delay)
 
 # ---- Inlined extract_article_text (from article_parser.py) ----
-async def extract_article_text(
-    url: str,
-    ssl_context=None,
-    max_length: int = 5000,
-    session: aiohttp.ClientSession | None = None
-) -> str:
-    """Извлекает текст статьи с ретраями и fallback-экстракторами."""
-    ctx = ssl_context if ssl_context is not None else ssl.create_default_context()
-
+async def extract_article_text(url: str, ssl_context=None, max_length: int = 5000, session: aiohttp.ClientSession | None = None) -> str:
+    ctx = ssl_context or ssl.create_default_context()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NewsBot/1.0",
         "Accept-Language": "en-US,en;q=0.9"
     }
-
     MAX_DOWNLOAD = max(200_000, min(1_000_000, max_length * 200))
 
     async def _read_limited(resp, max_bytes):
         chunks, size = [], 0
         async for chunk in resp.content.iter_chunked(8192):
-            chunks.append(chunk)
             size += len(chunk)
             if size >= max_bytes:
                 logging.debug(f"⚠️ HTML truncated at {size} bytes for {url}")
                 break
-        try:
-            return b"".join(chunks).decode(errors="ignore")
-        except Exception:
-            return b"".join(chunks).decode("utf-8", errors="ignore")
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="ignore")
 
-    html_text = ""
     backoff = 1
-    for attempt in range(1, 4):
+    for attempt in range(3):
         try:
-            if session is None:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as s:
-                    async with s.get(url, ssl=ctx) as r:
-                        if r.status != 200:
-                            logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
-                            raise Exception(f"HTTP {r.status}")
-                        html_text = await _read_limited(r, MAX_DOWNLOAD)
-            else:
-                async with session.get(url, ssl=ctx, headers=headers) as r:
+            async with (session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers)) as s:
+                async with s.get(url, ssl=ctx, headers=headers) as r:
                     if r.status != 200:
                         logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
-                        raise Exception(f"HTTP {r.status}")
-                    html_text = await _read_limited(r, MAX_DOWNLOAD)
-            break
+                        return ""
+                    return await _read_limited(r, MAX_DOWNLOAD)
         except Exception as e:
-            logging.debug(f"load attempt {attempt} failed for {url}: {e}")
-            if attempt < 3:
+            logging.debug(f"load attempt {attempt + 1} failed for {url}: {e}")
+            if attempt < 2:
                 await asyncio.sleep(backoff)
                 backoff *= 2
             else:
@@ -513,11 +463,11 @@ async def fetch_and_check(session, url, head_only=False):
         return (url, f"❌ {e.__class__.__name__}") if head_only else []
 
 def clean_text(text: str) -> str:
-    try:
-        if "<" in text and ">" in text:
+    if "<" in text and ">" in text:
+        try:
             text = BeautifulSoup(text, "html.parser").get_text()
-    except Exception:
-        pass
+        except Exception:
+            pass
     return " ".join(text.split())
 
 from html import escape
@@ -990,28 +940,20 @@ async def send_news():
 
         # (Проверка на seen_links была поднята выше чтобы избежать лишней работы)
 
-        async def send_and_log(fn, CHAT_ID, part_msg):
-            """Пытается отправить часть сообщения.
-            Возвращает: "ok" / "rate_limited" / "fail".
-            """
-            import inspect, telegram
-            logging.info("OUTGOING_MSG_PREVIEW: %s", part_msg[:500])
-            for attempt in range(2):  # уменьшил число локальных попыток — не держим очередь долго
+        async def send_and_log(fn, chat_id: int, part_msg: str) -> str:
+            logging.info(f"📤 Sending: {part_msg[:500]}...")
+            for attempt in range(2):
                 try:
-                    if inspect.iscoroutinefunction(fn):
-                        await fn(chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
-                    else:
-                        await asyncio.to_thread(fn, chat_id=CHAT_ID, text=part_msg, parse_mode="HTML")
+                    await fn(chat_id=chat_id, text=part_msg, parse_mode="HTML")
                     return "ok"
                 except telegram.error.TimedOut:
-                    logging.warning("⚠️ send timeout, retrying quickly")
+                    logging.warning(f"⚠️ Send timeout (attempt {attempt + 1})")
                     await asyncio.sleep(1 + attempt)
+                except telegram.error.RetryAfter as e:
+                    logging.warning(f"⏳ Rate limited (retry after {e.retry_after}s)")
+                    return "rate_limited"
                 except Exception as e:
-                    err = str(e)
-                    logging.error(f"❌ Send error attempt {attempt+1}: {e}")
-                    if "429" in err or "Too Many Requests" in err or getattr(e, "retry_after", None):
-                        logging.warning("⏳ Detected rate limit")
-                        return "rate_limited"
+                    logging.error(f"❌ Send error (attempt {attempt + 1}): {e}")
                     await asyncio.sleep(0.5)
             return "fail"
         
