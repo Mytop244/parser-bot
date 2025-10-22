@@ -123,11 +123,11 @@ def split_text_safe(text: str, limit: int = HTML_SAFE_LIMIT) -> list[str]:
     return parts
 
 def clean_text(text: str) -> str:
-    try:
-        if "<" in text and ">" in text:
+    if "<" in text and ">" in text:
+        try:
             text = BeautifulSoup(text, "html.parser").get_text()
-    except Exception:
-        pass
+        except Exception:
+            pass
     return " ".join(text.split())
 
 def parse_iso_utc(s):
