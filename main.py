@@ -19,6 +19,10 @@ STATE_FILE = "state.json"
 LEGACY_SEEN = "seen.json"
 LEGACY_SENT = "sent_links.json"
 
+SMART_PAUSE = os.getenv("SMART_PAUSE", "0") == "1"
+SMART_PAUSE_MIN = int(os.getenv("SMART_PAUSE_MIN", "30"))
+SMART_PAUSE_MAX = int(os.getenv("SMART_PAUSE_MAX", "60"))
+
 STATE_DAYS_LIMIT = int(os.getenv("STATE_DAYS_LIMIT", "3"))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 raw_chat = os.environ.get("CHAT_ID")
@@ -760,7 +764,13 @@ async def send_news(session: aiohttp.ClientSession):
         logging.warning("⚠️ Не удалось сохранить state.json")
 
     logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей. Пауза {pause} сек")
-    await asyncio.sleep(pause)
+    # ⚡ Умная пауза через .env
+    if SMART_PAUSE and sent_count == 0:
+        fast_retry = min(SMART_PAUSE_MAX, max(SMART_PAUSE_MIN, pause // 4 or SMART_PAUSE_MIN))
+        logging.info(f"⏩ SMART_PAUSE активна: новых новостей нет, следующая проверка через {fast_retry} сек")
+        await asyncio.sleep(fast_retry)
+    else:
+        await asyncio.sleep(pause)
 
 # ---- main loop ----
 async def check_sources():
