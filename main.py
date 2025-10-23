@@ -108,19 +108,15 @@ if not SSL_VERIFY:
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
 # --- Пул соединений и глобальная сессия ---
-AIOHTTP_TOTAL_TIMEOUT = float(os.getenv("AIOHTTP_TOTAL_TIMEOUT", "20"))
-AIOHTTP_CONNECT_TIMEOUT = float(os.getenv("AIOHTTP_CONNECT_TIMEOUT", "5"))
-CONNECTOR_LIMIT = int(os.getenv("CONNECTOR_LIMIT", "50"))
-DNS_TTL_CACHE = int(os.getenv("DNS_TTL_CACHE", "300"))
-
-_session_timeout = aiohttp.ClientTimeout(total=AIOHTTP_TOTAL_TIMEOUT, connect=AIOHTTP_CONNECT_TIMEOUT)
-_conn = aiohttp.TCPConnector(limit=CONNECTOR_LIMIT, ssl=ssl_ctx, ttl_dns_cache=DNS_TTL_CACHE)
 _global_session = None
 
 async def get_session():
+    """Создаёт или возвращает общую сессию после запуска event loop"""
     global _global_session
     if _global_session is None or _global_session.closed:
-        _global_session = aiohttp.ClientSession(connector=_conn, timeout=_session_timeout)
+        timeout = aiohttp.ClientTimeout(total=20, connect=5)
+        connector = aiohttp.TCPConnector(limit=50, ssl=ssl_ctx, ttl_dns_cache=300)
+        _global_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
     return _global_session
 
 # Telegram bot (single instance)
