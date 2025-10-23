@@ -73,6 +73,16 @@ FOOTER_TEMPLATE = os.getenv("FOOTER_TEMPLATE",
 BODY_PREFIX = os.getenv("BODY_PREFIX", "💬 ")
 HTML_SAFE_LIMIT = 4096
 
+# Глобальная переменная для адаптивной паузы при ошибках модели
+last_error = ""
+
+def set_last_error(val: str):
+    """Safely set module-level last_error from inside async functions without using 'global' repeatedly."""
+    try:
+        globals()['last_error'] = val
+    except Exception:
+        pass
+
 if hasattr(time, "tzset"):
     os.environ["TZ"] = os.environ.get("TIMEZONE", "UTC")
     time.tzset()
@@ -431,10 +441,12 @@ def _close_session():
 
 # ---- Model wrappers (Gemini + Ollama) ----
 async def summarize_ollama(text: str):
+    global last_error
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
     prompt = OLLAMA_PROMPT.format(content=prompt_text)
     logging.info(f"🧠 [OLLAMA INPUT] >>> {prompt_text[:500]}")
     async def run_model(model_name: str):
+        global last_error
         url = "http://127.0.0.1:11434/api/generate"
         payload = {"model": model_name, "prompt": prompt, "options": {"num_predict": MODEL_MAX_TOKENS}}
         start_time = time.time()
@@ -462,6 +474,7 @@ async def summarize_ollama(text: str):
                                 text_acc += data.get("response", "")
                     except Exception as e:
                         logging.error(f"❌ Ollama ({model_name}) stream error: {e}")
+                        set_last_error(f"Ollama stream error: {e}")
                         return None, model_name
                     output = text_acc.strip()
                     if not output:
@@ -471,10 +484,12 @@ async def summarize_ollama(text: str):
                     logging.info(f"✅ Ollama ({model_name}) за {elapsed} сек")
                     logging.info(f"🧠 [OLLAMA OUTPUT] <<< {output[:800]}")
                     return output, model_name
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logging.error(f"⏰ Ollama ({model_name}) таймаут")
+            set_last_error(f"Ollama timeout: {e}")
         except Exception as e:
             logging.error(f"❌ Ollama ({model_name}): {e}")
+            set_last_error(f"Ollama error: {e}")
         return None, model_name
 
     result, used_model = await run_model(OLLAMA_MODEL)
@@ -482,10 +497,13 @@ async def summarize_ollama(text: str):
         logging.warning(f"⚠️ Переключаюсь на резервную модель {OLLAMA_MODEL_FALLBACK}")
         result, used_model = await run_model(OLLAMA_MODEL_FALLBACK)
     if not result:
+        set_last_error("Ollama no result")
         return prompt_text[:2000] + "...", "local-fallback"
+    set_last_error("")
     return result, used_model
 
 async def summarize_gemini(text, max_tokens=200, retries=3):
+    global last_error
     text = clean_text(text)
     prompt_text = GEMINI_PROMPT.format(content=text[:PARSER_MAX_TEXT_LENGTH])
     if not AI_STUDIO_KEY:
@@ -511,6 +529,7 @@ async def summarize_gemini(text, max_tokens=200, retries=3):
                 result = json.loads(body)
         except Exception as e:
             logging.warning(f"⚠️ Gemini error: {e}")
+            set_last_error(f"Gemini error: {e}")
             await asyncio.sleep(backoff); backoff *= 2
             continue
         try:
@@ -520,10 +539,13 @@ async def summarize_gemini(text, max_tokens=200, retries=3):
                 if parts and "text" in parts[0]:
                     text_out = parts[0]["text"]
                     logging.info(f"✅ Gemini OK ({GEMINI_MODEL})")
+                    set_last_error("")
                     return text_out.strip(), GEMINI_MODEL
         except Exception as e:
             logging.warning(f"⚠️ Ошибка парсинга Gemini: {e}")
+            set_last_error(f"Gemini parse error: {e}")
     logging.error("❌ Gemini не ответил, fallback на Ollama")
+    set_last_error("Gemini no response")
     return await summarize_ollama(text)
 
 # ---- sanitization & splitting helpers (centralized) ----
@@ -871,7 +893,15 @@ async def main():
                     logging.exception(f"❌ Ошибка в send_news: {e}")
                 logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин\n")
                 print("💤 цикл завершён, жду следующий", flush=True)
-                await asyncio.sleep(INTERVAL)
+                # 💤 адаптивная пауза при ошибках модели
+                delay = INTERVAL
+                try:
+                    if isinstance(last_error, str) and ("Gemini 503" in last_error or "Service Unavailable" in last_error):
+                        delay = min(INTERVAL * 3, 300)  # максимум 5 минут
+                        logging.warning(f"⚠️ Увеличена пауза до {delay} сек из-за ошибки модели: {last_error}")
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
         except KeyboardInterrupt:
             logging.info("🛑 Завершение по Ctrl+C, сохраняем state…")
         finally:
