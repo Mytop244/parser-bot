@@ -5,8 +5,10 @@ from collections import defaultdict, deque
 from functools import partial
 from dotenv import load_dotenv
 import aiohttp, feedparser
+import random
 from bs4 import BeautifulSoup
 from telegram import Bot
+from telegram.error import RetryAfter, TimedOut, NetworkError
 from html import escape
 
 # Windows event loop policy
@@ -105,7 +107,7 @@ if not SSL_VERIFY:
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
 # Telegram bot (single instance)
-from telegram.request._httpxrequest import HTTPXRequest as Request
+from telegram.request import HTTPXRequest as Request
 req = Request(connect_timeout=15, read_timeout=60, write_timeout=60)
 bot = Bot(token=TELEGRAM_TOKEN, request=req)
 
@@ -246,13 +248,17 @@ def migrate_legacy_files():
 migrate_legacy_files()
 
 # ---- HTTP helpers ----
-async def fetch_text_limited(session: aiohttp.ClientSession, url: str, max_bytes: int):
+async def fetch_text_limited(response, max_bytes: int, ctx_url: str = ""):
+    """
+    Accepts an aiohttp response (streaming) and returns up to max_bytes of decoded text.
+    ctx_url used only for logging.
+    """
     chunks, size = [], 0
-    async for chunk in session.content.iter_chunked(8192):
+    async for chunk in response.content.iter_chunked(8192):
         chunks.append(chunk)
         size += len(chunk)
         if size >= max_bytes:
-            logging.debug(f"⚠️ HTML truncated at {size} bytes for {url}")
+            logging.debug(f"⚠️ HTML truncated at {size} bytes for {ctx_url}")
             break
     try:
         return b"".join(chunks).decode(errors="ignore")
@@ -262,9 +268,11 @@ async def fetch_text_limited(session: aiohttp.ClientSession, url: str, max_bytes
 async def fetch_url(session: aiohttp.ClientSession, url: str, head_only=False):
     try:
         if head_only:
-            async with session.head(url, ssl=ssl_ctx) as r:
+            async with session.head(url, ssl=ssl_ctx, timeout=aiohttp.ClientTimeout(total=10),
+                                     headers={"User-Agent": "NewsBot/1.0"}) as r:
                 if r.status == 405:
-                    async with session.get(url, ssl=ssl_ctx) as r2:
+                    async with session.get(url, ssl=ssl_ctx, timeout=aiohttp.ClientTimeout(total=10),
+                                            headers={"User-Agent": "NewsBot/1.0"}) as r2:
                         return url, "✅ OK" if r2.status == 200 else f"⚠️ HTTP {r2.status}"
                 return url, "✅ OK" if r.status == 200 else f"⚠️ HTTP {r.status}"
         async with session.get(url, ssl=ssl_ctx) as r:
@@ -313,13 +321,13 @@ async def extract_article_text(url: str, ssl_context=None, max_length: int = 500
                         if r.status != 200:
                             logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
                             raise Exception(f"HTTP {r.status}")
-                        html_text = await fetch_text_limited(r, url, MAX_DOWNLOAD)
+                        html_text = await fetch_text_limited(r, MAX_DOWNLOAD, url)
             else:
                 async with session.get(url, ssl=ctx, headers=headers) as r:
                     if r.status != 200:
                         logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
                         raise Exception(f"HTTP {r.status}")
-                    html_text = await fetch_text_limited(r, url, MAX_DOWNLOAD)
+                    html_text = await fetch_text_limited(r, MAX_DOWNLOAD, url)
             break
         except Exception as e:
             logging.debug(f"load attempt {attempt} failed for {url}: {e}")
@@ -447,7 +455,7 @@ async def summarize_gemini(text, max_tokens=200, retries=3):
     for attempt in range(1, retries+1):
         try:
             logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]}")
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     body = await resp.text()
                     if resp.status == 429:
@@ -529,13 +537,18 @@ async def send_with_retry(chat_id: int, part_msg: str, attempts: int = 3):
         try:
             await bot.send_message(chat_id=chat_id, text=part_msg, parse_mode="HTML")
             return
+        except RetryAfter as e:
+            # Bot is rate-limited, sleep for the suggested period then retry
+            logging.warning(f"⏳ Rate limited, retry after {getattr(e, 'retry_after', 'unknown')}s: {e}")
+            wait = getattr(e, 'retry_after', 5)
+            await asyncio.sleep(wait + 1)
+        except (TimedOut, NetworkError) as e:
+            logging.warning(f"Сетевая ошибка/таймаут: {e}, попытка {attempt+1}")
+            await asyncio.sleep(3 * (attempt + 1))
         except Exception as e:
-            if "429" in str(e):
-                logging.warning(f"⏳ Rate limited: {e}")
-                raise
             logging.warning(f"Send attempt {attempt+1} failed: {e}")
             await asyncio.sleep(3 * (attempt + 1))
-    logging.error("❌ Не удалось отправить сообщение после попыток")
+    logging.error("❌ Не удалось отправить сообщение после всех попыток")
 
 async def send_long_message(bot_instance, chat_id: int, text: str, parse_mode="HTML", delay: int = 1):
     if text in _cache:
@@ -766,8 +779,15 @@ async def send_news(session: aiohttp.ClientSession):
     logging.info(f"✅ Отправлено {sent_count}/{len(current_batch)} новостей. Пауза {pause} сек")
     # ⚡ Умная пауза через .env
     if SMART_PAUSE and sent_count == 0:
-        fast_retry = min(SMART_PAUSE_MAX, max(SMART_PAUSE_MIN, pause // 4 or SMART_PAUSE_MIN))
-        logging.info(f"⏩ SMART_PAUSE активна: новых новостей нет, следующая проверка через {fast_retry} сек")
+        # ensure sensible bounds
+        min_p = max(1, SMART_PAUSE_MIN)
+        max_p = max(min_p, SMART_PAUSE_MAX)
+        base = pause // 4 or min_p
+        base = max(min_p, min(base, max_p))
+        # add small jitter to avoid thundering herd
+        jitter = int(random.uniform(-0.15, 0.15) * base)
+        fast_retry = max(min_p, min(max_p, base + jitter))
+        logging.info(f"⏩ SMART_PAUSE активна: новых новостей нет, следующая проверка через {fast_retry} сек (base={base}, jitter={jitter})")
         await asyncio.sleep(fast_retry)
     else:
         await asyncio.sleep(pause)
@@ -777,7 +797,11 @@ async def check_sources():
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         results = await asyncio.gather(*[fetch_and_check(session, url, head_only=True) for url in RSS_URLS])
     logging.info("🔍 Проверка источников:")
-    for u, s in results:
+    for item in results:
+        if not item or not isinstance(item, tuple) or len(item) != 2:
+            logging.warning(f"Непредвиденный результат при проверке источника: {item}")
+            continue
+        u, s = item
         logging.info(f"  {s} — {u}")
 
 async def main():
