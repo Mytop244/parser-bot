@@ -1,4 +1,3 @@
-# optimized_newsbot.py — оптимизированная версия, сохраняет весь функционал
 import os, sys, json, time, asyncio, ssl, logging, tempfile, re, html, calendar
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
