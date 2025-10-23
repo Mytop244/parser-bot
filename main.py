@@ -9,7 +9,6 @@ import atexit
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut, NetworkError
-from html import escape
 
 # Windows event loop policy
 if sys.platform.startswith("win"):
@@ -230,7 +229,25 @@ async def save_state_async():
 def mark_state(kind: str, key: str, value):
     if kind not in state:
         state[kind] = {}
-    state[kind][key] = value
+    # normalize value to int timestamp
+    ts = None
+    if isinstance(value, (int, float)):
+        ts = int(value)
+    elif isinstance(value, datetime):
+        ts = int(value.astimezone(timezone.utc).timestamp())
+    elif isinstance(value, str):
+        try:
+            dt = parse_iso_utc(value)
+            ts = int(dt.timestamp())
+        except Exception:
+            try:
+                ts = int(float(value))
+            except Exception:
+                ts = int(time.time())
+    else:
+        ts = int(time.time())
+
+    state[kind][key] = ts
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -245,6 +262,7 @@ def mark_state(kind: str, key: str, value):
                 asyncio.run(save_state_async())
             except Exception:
                 logging.exception("Не удалось сохранить state при mark_state")
+    logging.debug(f"Updated state[{kind}][{key}] = {ts!r}")
 
 # migrate legacy files
 def migrate_legacy_files():
@@ -768,9 +786,9 @@ async def send_news(session: aiohttp.ClientSession):
             title_clean = title_clean[:MAX_TITLE_LEN].rsplit(" ", 1)[0] + "…"
         summary_clean = sanitize_summary((summary_text or "").strip())
 
-        title_safe = escape(title_clean)
+        title_safe = html.escape(title_clean)
         summary_safe = summary_clean
-        link_safe = escape(l, quote=True)
+        link_safe = html.escape(l, quote=True)
 
         header = HEADER_TEMPLATE.format(title=title_safe, source=s, date=local_time_str)
         body = f"{BODY_PREFIX}{summary_safe}"
@@ -822,7 +840,7 @@ async def send_news(session: aiohttp.ClientSession):
                 if isinstance(pp, str):
                     try: pp = parse_iso_utc(pp)
                     except Exception: pass
-                iso_p = pp.isoformat() if hasattr(pp, "isoformat") else str(pp)
+                iso_p = pp.isoformat() if hasattr(pp, "isoformat") else (None if pp is None else str(pp))
                 safe_queue.append((tt, ll, ss, summ, iso_p))
             try:
                 with open("news_queue.json", "w", encoding="utf-8") as f:
@@ -832,6 +850,10 @@ async def send_news(session: aiohttp.ClientSession):
 
     # finalize state
     state.setdefault("sent", {})
+    # state уже обновлялся через mark_state; удаляем устаревшие записи
+    cutoff_ts = cutoff.timestamp() if isinstance(cutoff, datetime) else cutoff
+    state["sent"] = {k: v for k, v in state.get("sent", {}).items() if (isinstance(v, (int, float)) and v > cutoff_ts)}
+    # добавляем новые отправленные ссылки
     state["sent"].update(sent_links)
     if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list:
         state.setdefault("meta", {})
