@@ -6,6 +6,7 @@ from functools import partial
 from dotenv import load_dotenv
 import aiohttp, feedparser
 import random
+import atexit
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut, NetworkError
@@ -105,6 +106,22 @@ ssl_ctx = ssl.create_default_context()
 if not SSL_VERIFY:
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
+
+# --- Пул соединений и глобальная сессия ---
+AIOHTTP_TOTAL_TIMEOUT = float(os.getenv("AIOHTTP_TOTAL_TIMEOUT", "20"))
+AIOHTTP_CONNECT_TIMEOUT = float(os.getenv("AIOHTTP_CONNECT_TIMEOUT", "5"))
+CONNECTOR_LIMIT = int(os.getenv("CONNECTOR_LIMIT", "50"))
+DNS_TTL_CACHE = int(os.getenv("DNS_TTL_CACHE", "300"))
+
+_session_timeout = aiohttp.ClientTimeout(total=AIOHTTP_TOTAL_TIMEOUT, connect=AIOHTTP_CONNECT_TIMEOUT)
+_conn = aiohttp.TCPConnector(limit=CONNECTOR_LIMIT, ssl=ssl_ctx, ttl_dns_cache=DNS_TTL_CACHE)
+_global_session = None
+
+async def get_session():
+    global _global_session
+    if _global_session is None or _global_session.closed:
+        _global_session = aiohttp.ClientSession(connector=_conn, timeout=_session_timeout)
+    return _global_session
 
 # Telegram bot (single instance)
 from telegram.request import HTTPXRequest as Request
@@ -267,15 +284,14 @@ async def fetch_text_limited(response, max_bytes: int, ctx_url: str = ""):
 
 async def fetch_url(session: aiohttp.ClientSession, url: str, head_only=False):
     try:
+        headers = {"User-Agent": "NewsBot/1.0"}
         if head_only:
-            async with session.head(url, ssl=ssl_ctx, timeout=aiohttp.ClientTimeout(total=10),
-                                     headers={"User-Agent": "NewsBot/1.0"}) as r:
+            async with session.head(url, ssl=ssl_ctx, headers=headers) as r:
                 if r.status == 405:
-                    async with session.get(url, ssl=ssl_ctx, timeout=aiohttp.ClientTimeout(total=10),
-                                            headers={"User-Agent": "NewsBot/1.0"}) as r2:
+                    async with session.get(url, ssl=ssl_ctx, headers=headers) as r2:
                         return url, "✅ OK" if r2.status == 200 else f"⚠️ HTTP {r2.status}"
                 return url, "✅ OK" if r.status == 200 else f"⚠️ HTTP {r.status}"
-        async with session.get(url, ssl=ssl_ctx) as r:
+        async with session.get(url, ssl=ssl_ctx, headers=headers) as r:
             if r.status != 200:
                 raise Exception(f"HTTP {r.status}")
             body = await r.text()
@@ -386,6 +402,38 @@ async def extract_article_text(url: str, ssl_context=None, max_length: int = 500
     logging.warning(f"⚠️ Не удалось извлечь текст для {url}")
     return ""
 
+
+async def parse_html(url, html_text):
+    try:
+        # Используем lxml-парсер если доступен (быстрее)
+        soup = BeautifulSoup(html_text, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html_text, "html.parser")
+    title = soup.title.string.strip() if soup.title else ""
+    paragraphs = " ".join(p.get_text(" ", strip=True) for p in soup.select("p"))
+    return f"{title}\n\n{paragraphs[:3000]}"
+
+
+async def feed_to_items(feed_url):
+    try:
+        loop = asyncio.get_running_loop()
+        feed = await loop.run_in_executor(None, feedparser.parse, feed_url)
+        return [(getattr(e, 'title', ''), getattr(e, 'link', ''), getattr(e, 'published', None)) for e in feed.entries]
+    except Exception as e:
+        logging.error(f"Feed parse error {feed_url}: {e}")
+        return []
+
+
+# --- Быстрое закрытие сессии при выходе ---
+@atexit.register
+def _close_session():
+    try:
+        global _global_session
+        if _global_session and not _global_session.closed:
+            asyncio.run(_global_session.close())
+    except Exception:
+        pass
+
 # ---- Model wrappers (Gemini + Ollama) ----
 async def summarize_ollama(text: str):
     prompt_text = text[:PARSER_MAX_TEXT_LENGTH]
@@ -455,17 +503,17 @@ async def summarize_gemini(text, max_tokens=200, retries=3):
     for attempt in range(1, retries+1):
         try:
             logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]}")
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    body = await resp.text()
-                    if resp.status == 429:
-                        logging.warning("⚠️ Gemini quota exceeded — fallback to Ollama")
-                        return await summarize_ollama(text)
-                    if resp.status >= 400:
-                        logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body}")
-                        await asyncio.sleep(backoff); backoff *= 2
-                        continue
-                    result = json.loads(body)
+            session = await get_session()
+            async with session.post(url, json=payload, headers=headers) as resp:
+                body = await resp.text()
+                if resp.status == 429:
+                    logging.warning("⚠️ Gemini quota exceeded — fallback to Ollama")
+                    return await summarize_ollama(text)
+                if resp.status >= 400:
+                    logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body}")
+                    await asyncio.sleep(backoff); backoff *= 2
+                    continue
+                result = json.loads(body)
         except Exception as e:
             logging.warning(f"⚠️ Gemini error: {e}")
             await asyncio.sleep(backoff); backoff *= 2
@@ -793,11 +841,17 @@ async def send_news(session: aiohttp.ClientSession):
         await asyncio.sleep(pause)
 
 # ---- main loop ----
-async def check_sources():
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-        results = await asyncio.gather(*[fetch_and_check(session, url, head_only=True) for url in RSS_URLS])
+async def check_sources(urls=None):
+    if urls is None:
+        urls = RSS_URLS
+    session = await get_session()
+    tasks = [fetch_url(session, u, head_only=True) for u in urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     logging.info("🔍 Проверка источников:")
     for item in results:
+        if isinstance(item, Exception):
+            logging.warning(f"Ошибка при проверке источника: {item}")
+            continue
         if not item or not isinstance(item, tuple) or len(item) != 2:
             logging.warning(f"Непредвиденный результат при проверке источника: {item}")
             continue
