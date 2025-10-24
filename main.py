@@ -535,7 +535,8 @@ async def summarize_gemini(text, max_tokens=200, retries=3):
         try:
             logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]}")
             session = await get_session()
-            async with session.post(url, json=payload, headers=headers) as resp:
+            timeout_val = None if attempt == 3 else 60
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_val)) as resp:
                 body = await resp.text()
                 if resp.status == 429:
                     logging.warning("⚠️ Gemini quota exceeded — fallback to Ollama")
