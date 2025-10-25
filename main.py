@@ -534,7 +534,7 @@ async def summarize_ollama(text: str):
     set_last_error("")
     return result, used_model
 
-async def summarize_gemini(text: str):
+async def summarize_gemini(text: str, max_tokens: int | None = None):
     # Reuse global session, apply per-request timeout and env-configured retries
     text = clean_text(text)
     prompt_text = GEMINI_PROMPT.format(content=text[:PARSER_MAX_TEXT_LENGTH])
@@ -542,7 +542,12 @@ async def summarize_gemini(text: str):
         logging.debug("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
         return await summarize_ollama(text)
 
-    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+        # Добавлен лимит токенов (используется значение max_tokens или глобальная константа)
+    effective_max = max_tokens if (max_tokens is not None) else GEMINI_MAX_TOKENS
+    payload = {
+         "contents": [{"parts": [{"text": prompt_text}]}],
+         "generationConfig": {"maxOutputTokens": int(effective_max)}
+     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": AI_STUDIO_KEY}
 
