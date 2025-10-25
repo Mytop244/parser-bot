@@ -50,6 +50,7 @@ PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH",
                                            os.environ.get("MAX_TEXT_LENGTH", "10000")))
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 180))
 MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 1200))
+MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 GEMINI_PROMPT = os.getenv("GEMINI_PROMPT",
     "Сделай профессиональное краткое резюме новости на русском языке, без вступления, дели на абзацы:\n{content}")
 OLLAMA_PROMPT = os.getenv("OLLAMA_PROMPT",
@@ -209,7 +210,12 @@ def save_state_atomic(data, path=STATE_FILE):
 
 _state_lock = asyncio.Lock()
 async def save_state_async():
-    import aiofiles
+    try:
+        import aiofiles
+        have_aiofiles = True
+    except Exception:
+        have_aiofiles = False
+
     async with _state_lock:
         now = time.time()
         cutoff = now - STATE_DAYS_LIMIT * 86400
@@ -218,9 +224,17 @@ async def save_state_async():
         fd, tmp_path = tempfile.mkstemp(prefix="state_", suffix=".json", dir=".")
         os.close(fd)
         try:
-            async with aiofiles.open(tmp_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(state, ensure_ascii=False, indent=2))
-            os.replace(tmp_path, STATE_FILE)
+            if have_aiofiles:
+                async with aiofiles.open(tmp_path, "w", encoding="utf-8") as f:
+                    await f.write(json.dumps(state, ensure_ascii=False, indent=2))
+                os.replace(tmp_path, STATE_FILE)
+            else:
+                def _sync_write():
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        f.write(json.dumps(state, ensure_ascii=False, indent=2))
+                    os.replace(tmp_path, STATE_FILE)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _sync_write)
         finally:
             if os.path.exists(tmp_path):
                 try: os.remove(tmp_path)
@@ -520,50 +534,61 @@ async def summarize_ollama(text: str):
     set_last_error("")
     return result, used_model
 
-async def summarize_gemini(text, max_tokens=200, retries=3):
-    global last_error
+async def summarize_gemini(text: str):
+    # Reuse global session, apply per-request timeout and env-configured retries
     text = clean_text(text)
     prompt_text = GEMINI_PROMPT.format(content=text[:PARSER_MAX_TEXT_LENGTH])
     if not AI_STUDIO_KEY:
         logging.debug("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
         return await summarize_ollama(text)
-    payload = {"contents":[{"parts":[{"text":prompt_text}]}], "generationConfig":{"maxOutputTokens": max_tokens or MODEL_MAX_TOKENS}}
+
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": AI_STUDIO_KEY, "Content-Type": "application/json"}
-    backoff = 1
-    for attempt in range(1, retries+1):
+    headers = {"Content-Type": "application/json", "x-goog-api-key": AI_STUDIO_KEY}
+
+    GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+    GEMINI_RETRY_DELAY = int(os.getenv("GEMINI_RETRY_DELAY", "3"))
+
+    session = await get_session()
+    for attempt in range(GEMINI_MAX_RETRIES):
+        timeout_value = MODEL_TIMEOUT if attempt < GEMINI_MAX_RETRIES - 1 else None
+        per_request_timeout = aiohttp.ClientTimeout(total=timeout_value)
+        logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]} (attempt {attempt+1}/{GEMINI_MAX_RETRIES}) timeout={timeout_value}")
         try:
-            logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]}")
-            session = await get_session()
-            async with session.post(url, json=payload, headers=headers) as resp:
+            async with session.post(url, json=payload, headers=headers, timeout=per_request_timeout) as resp:
                 body = await resp.text()
-                if resp.status == 429:
+                if resp.status == 200:
+                    try:
+                        result = json.loads(body) if body else {}
+                        candidates = result.get("candidates") if isinstance(result, dict) else None
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts and "text" in parts[0]:
+                                text_out = parts[0]["text"]
+                                logging.info(f"✅ Gemini OK ({GEMINI_MODEL})")
+                                set_last_error("")
+                                return text_out.strip(), GEMINI_MODEL
+                        logging.warning("⚠️ Gemini: 200, но нет валидного candidates — retrying")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Ошибка парсинга Gemini: {e}")
+                        set_last_error(f"Gemini parse error: {e}")
+                elif resp.status == 429:
                     logging.warning("⚠️ Gemini quota exceeded — fallback to Ollama")
+                    set_last_error("Gemini quota exceeded")
                     return await summarize_ollama(text)
-                if resp.status >= 400:
-                    logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body}")
-                    await asyncio.sleep(backoff); backoff *= 2
-                    continue
-                result = json.loads(body)
+                else:
+                    logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body} (attempt {attempt+1})")
+        except asyncio.TimeoutError:
+            logging.warning(f"⏰ Gemini attempt {attempt+1} timed out after {timeout_value}")
+            set_last_error(f"Gemini timeout: {timeout_value}")
         except Exception as e:
-            logging.warning(f"⚠️ Gemini error: {e}")
+            logging.warning(f"⚠️ Gemini attempt {attempt+1} failed: {e}")
             set_last_error(f"Gemini error: {e}")
-            await asyncio.sleep(backoff); backoff *= 2
-            continue
-        try:
-            candidates = result.get("candidates")
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    text_out = parts[0]["text"]
-                    logging.info(f"✅ Gemini OK ({GEMINI_MODEL})")
-                    set_last_error("")
-                    return text_out.strip(), GEMINI_MODEL
-        except Exception as e:
-            logging.warning(f"⚠️ Ошибка парсинга Gemini: {e}")
-            set_last_error(f"Gemini parse error: {e}")
-    logging.error("❌ Gemini не ответил, fallback на Ollama")
-    set_last_error("Gemini no response")
+
+        if attempt < GEMINI_MAX_RETRIES - 1:
+            await asyncio.sleep(GEMINI_RETRY_DELAY)
+
+    logging.error("❌ Все попытки Gemini неудачны — возврат через Ollama")
     return await summarize_ollama(text)
 
 # ---- sanitization & splitting helpers (centralized) ----
