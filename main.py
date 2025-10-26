@@ -375,6 +375,8 @@ async def fetch_and_check(session, url, head_only=False):
             summary,
             pub
         ))
+    new_count = sum(1 for _, link, _, _, _ in news if link not in state.get("seen", {}))
+    logging.info(f"🆕 Найдено {new_count} новых новостей из {len(news)} в источнике: {url}")
     return news
 
 # ---- article extraction (kept behavior, but reuses passed session when available) ----
