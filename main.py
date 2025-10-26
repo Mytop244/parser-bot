@@ -280,19 +280,30 @@ def mark_state(kind: str, key: str, value):
 
 # migrate legacy files
 def migrate_legacy_files():
-    migrated = False
     state_local = {"seen": {}, "sent": {}}
+    migrated = False
+
     try:
         if os.path.exists(LEGACY_SEEN):
             with open(LEGACY_SEEN, "r", encoding="utf-8") as f:
-                state_local["seen"] = json.load(f)
-            migrated = True
+                try:
+                    state_local["seen"] = json.load(f)
+                    migrated = True
+                except json.JSONDecodeError:
+                    logging.exception("Invalid JSON in LEGACY_SEEN")
+                    state_local["seen"] = {}
+                    migrated = True
+
         if os.path.exists(LEGACY_SENT):
             with open(LEGACY_SENT, "r", encoding="utf-8") as f:
                 state_local["sent"] = json.load(f)
-            migrated = True
+                migrated = True
+
         if migrated:
             save_state_atomic(state_local, STATE_FILE)
+            # обновляем глобальный state, чтобы текущий процесс сразу использовал новые данные
+            state.clear()
+            state.update(state_local)
             if os.path.exists(LEGACY_SEEN): os.remove(LEGACY_SEEN)
             if os.path.exists(LEGACY_SENT): os.remove(LEGACY_SENT)
             logging.info("✅ Миграция выполнена")
@@ -334,14 +345,21 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, head_only=False):
             body = await r.text()
             return body
     except Exception as e:
-        return (url, f"❌ {e.__class__.__name__}") if head_only else None
+        return (url, f"❌ {e.__class__.__name__}") if head_only else (url, None)
 
 async def fetch_and_check(session, url, head_only=False):
+    logging.info(f"🔍 Проверяю источник: {url}")
     res = await fetch_url(session, url, head_only=head_only)
     if head_only:
+        if res:
+            logging.debug(f"✅ Источник доступен: {url}")
+        else:
+            logging.warning(f"⚠️ Источник не отвечает: {url}")
         return res
     if not res:
+        logging.warning(f"⚠️ Источник не отвечает: {url}")
         return []
+    logging.debug(f"✅ Источник доступен: {url}")
     body = res
     feed = feedparser.parse(body)
     news = []
@@ -466,8 +484,26 @@ async def feed_to_items(feed_url):
 def _close_session():
     try:
         global _global_session
-        if _global_session and not _global_session.closed:
-            asyncio.run(_global_session.close())
+        if not _global_session:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(_global_session.close()))
+            except Exception:
+                pass
+        else:
+            try:
+                asyncio.run(_global_session.close())
+            except Exception:
+                try:
+                    _global_session.close()
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -542,7 +578,7 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
         logging.debug("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
         return await summarize_ollama(text)
 
-        # Добавлен лимит токенов (используется значение max_tokens или глобальная константа)
+    # Добавлен лимит токенов (используется значение max_tokens или глобальная константа)
     effective_max = max_tokens if (max_tokens is not None) else GEMINI_MAX_TOKENS
     payload = {
          "contents": [{"parts": [{"text": prompt_text}]}],
@@ -638,8 +674,10 @@ def split_html_preserve(text: str, limit: int = HTML_SAFE_LIMIT - 200):
         gt = text.rfind('>', i, j)
         if lt > gt:
             next_gt = text.find('>', j)
-            if next_gt != -1:
+            if next_gt != -1 and next_gt - i <= limit * 2:
                 j = next_gt + 1
+            else:
+                j = i + limit
         parts.append(text[i:j])
         i = j
     return parts
@@ -885,6 +923,19 @@ async def send_news(session: aiohttp.ClientSession):
     state["sent"] = {k: v for k, v in state.get("sent", {}).items() if (isinstance(v, (int, float)) and v > cutoff_ts)}
     # добавляем новые отправленные ссылки
     state["sent"].update(sent_links)
+    # Очистка state["seen"] по cutoff, чтобы не рос бесконечно
+    clean_seen = {}
+    for k, v in state.get("seen", {}).items():
+        try:
+            if isinstance(v, (int, float)):
+                if v >= cutoff_ts:
+                    clean_seen[k] = v
+            else:
+                if parse_iso_utc(v).timestamp() >= cutoff_ts:
+                    clean_seen[k] = v
+        except Exception:
+            continue
+    state["seen"] = clean_seen
     if ROUND_ROBIN_MODE and 'src_list' in locals() and src_list:
         state.setdefault("meta", {})
         state["meta"]["last_source_index"] = (last_index + sent_count) % len(src_list)
