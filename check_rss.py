@@ -88,13 +88,26 @@ async def main():
         s = orig.strip()
         if not s or s.startswith("#"):
             new_lines.append(orig)
-        else:
+            continue
+
+        try:
             u = next(url_iter)
-            ok = results_map.get(u, False)
-            mark = "✅" if ok else "❌"
-            logger.info("%s %s", mark, u)
-            # if already commented in file we left it; else add '# ' when dead
-            new_lines.append(orig if ok else "# " + orig)
+        except StopIteration:
+            new_lines.append(orig)
+            continue
+
+        ok = results_map.get(u, False)
+        mark = "✅" if ok else "❌"
+        logger.info("%s %s", mark, u)
+
+        # если строка уже закомментирована и снова ок — убираем #
+        if ok and orig.lstrip().startswith("# "):
+            new_lines.append(orig.lstrip("# ").strip())
+        elif not ok and not orig.lstrip().startswith("# "):
+            new_lines.append("# " + orig)
+        else:
+            new_lines.append(orig)
+
 
     # atomic write
     dirn = os.path.dirname(os.path.abspath(RSS_FILE))
