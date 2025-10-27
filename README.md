@@ -1,176 +1,170 @@
-### 📘 README.md
+Sure — here’s a clean, professional English `README.md` you can put on GitHub for your project 👇
+
+---
 
 ````markdown
-# 📰 Telegram AI News Bot
+# 📰 Async Telegram RSS News Bot
 
-**Telegram AI News Bot** — это асинхронный бот, который:
-- парсит RSS-ленты,
-- извлекает тексты новостей,
-- делает их краткое резюме при помощи **AI (Gemini / Ollama)**,
-- и публикует результаты в Telegram-канал или чат.
-
-В комплекте идёт вспомогательный скрипт `rss_checker.py` — для проверки живости RSS-источников и автоматического комментирования нерабочих ссылок в `rss.txt`.
+A powerful **asynchronous Python bot** that fetches, summarizes, and delivers news from multiple **RSS feeds** directly to a Telegram channel or chat.  
+It supports both **Google Gemini** and **Ollama local models** for AI-based news summarization, along with advanced error handling, caching, and state persistence.
 
 ---
 
-## 🚀 Возможности
+## ✨ Features
 
-- 📡 Поддержка любых RSS-лент (в `rss.txt`)
-- 🧠 Резюмирование новостей с помощью **Google Gemini API** или **Ollama LLM**
-- 🤖 Автоматическая отправка в Telegram через **Bot API**
-- ⚙️ Асинхронная работа (`asyncio` + `aiohttp`)
-- 🧩 Проверка RSS-источников (`rss_checker.py`)
-- 💾 Сохранение состояния, чтобы избежать дубликатов
-- 🧱 Простая настройка через `.env`
+- 📡 Fetches and parses multiple RSS feeds concurrently using `aiohttp` and `feedparser`
+- 🧠 AI-based summarization:
+  - **Google Gemini API** (`gemini-2.0-flash` by default)
+  - **Ollama local models** (e.g. `gpt-oss:20b`, `gpt-oss:120b`)
+- 🤖 Sends formatted messages directly to **Telegram**
+- 🕓 Filters recent news (by `DAYS_LIMIT`)
+- 🪶 Automatically extracts full article text using:
+  - `<article>` and `<p>` tags
+  - `trafilatura` or `readability` fallback
+- 🔄 Smart state persistence and migration (`state.json`)
+- 🧩 Supports adaptive pause and batching to avoid Telegram rate limits
+- 🧰 Configurable through `.env` and `rss.txt`
 
 ---
 
-## 🛠 Установка
+## ⚙️ Setup
 
-### 1. Клонируйте репозиторий
+### 1. Clone the repository
 ```bash
-git clone https://github.com/yourname/telegram-ai-news-bot.git
-cd telegram-ai-news-bot
+git clone https://github.com/yourusername/rss-telegram-bot.git
+cd rss-telegram-bot
 ````
 
-### 2. Создайте виртуальное окружение и установите зависимости
+### 2. Install dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Настройте окружение
+### 3. Create `.env`
 
-Создайте файл `.env` и укажите ключевые переменные:
+Example:
 
 ```env
-# Telegram
-TELEGRAM_BOT_TOKEN=123456789:ABCDEF...
-TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_TOKEN=your_telegram_bot_token
+CHAT_ID=123456789
+RSS_URLS=https://feeds.bbci.co.uk/news/rss.xml,https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
+AI_STUDIO_KEY=your_google_api_key
+AI_MODEL=gemini-2.5-flash
+OLLAMA_MODEL=gpt-oss:20b
+OLLAMA_MODEL_FALLBACK=gpt-oss:120b
+INTERVAL=600
+DAYS_LIMIT=1
+NEWS_LIMIT=5
+```
 
-# AI (один из вариантов)
-# Для Gemini
-GEMINI_API_KEY=your_gemini_api_key
+### 4. Optional: add `rss.txt`
 
-# Для Ollama
-OLLAMA_MODEL=llama3
-OLLAMA_API_BASE=http://localhost:11434
+If present, this file overrides `RSS_URLS`:
 
-# Прочее
-UPDATE_INTERVAL=300        # Период обновления RSS (сек)
-SUMMARY_SENTENCES=3        # Кол-во предложений в саммари
+```
+https://feeds.bbci.co.uk/news/rss.xml
+https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
+# comments are ignored
 ```
 
 ---
 
-## 📄 Файл `rss.txt`
-
-Добавьте в `rss.txt` список RSS-источников — по одному в строке.
-
-Пример:
-
-```
-https://meduza.io/rss/all
-https://habr.com/ru/rss/all/all/
-https://lenta.ru/rss/news
-```
-
----
-
-## 🧪 Проверка источников
-
-Перед запуском бота рекомендуется проверить ленты:
-
-```bash
-python rss_checker.py
-```
-
-Скрипт проверит все ссылки из `rss.txt` и автоматически закомментирует нерабочие (`# ...`) в том же файле.
-
----
-
-## ▶️ Запуск бота
-
-После настройки `.env` и `rss.txt` запустите:
+## 🚀 Run the Bot
 
 ```bash
 python main.py
 ```
 
-Бот начнёт:
+The bot will:
 
-* читать RSS-ленты,
-* формировать краткие AI-резюме,
-* и отправлять их в указанный Telegram-чат.
+1. Check all RSS feeds
+2. Parse and summarize recent news
+3. Send formatted updates to your Telegram channel
 
 ---
 
-## 🧰 Структура проекта
+## 🧠 AI Models
+
+| Model Type | Source                  | Description                             |
+| ---------- | ----------------------- | --------------------------------------- |
+| Gemini     | Google AI Studio        | Fast cloud summarization                |
+| Ollama     | Local (localhost:11434) | Offline summarization with local models |
+
+You can switch models dynamically using `.env`.
+
+---
+
+## 🪪 Logging
+
+All activity is logged to:
+
+```
+parser.log
+```
+
+Example:
+
+```
+2025-10-27 08:40:53 | INFO | 🔍 Checking source: https://www.bbc.co.uk/news/rss.xml
+2025-10-27 08:40:58 | INFO | ✅ Gemini OK (gemini-2.5-flash)
+```
+
+---
+
+## 🧩 Dependencies
+
+* Python 3.10+
+* `aiohttp`, `feedparser`, `python-dotenv`, `beautifulsoup4`
+* `python-telegram-bot`
+* Optional: `trafilatura`, `readability-lxml`
+
+Install all with:
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 📦 File Structure
 
 ```
 .
-├── main.py              # Основная логика Telegram AI бота
-├── rss_checker.py       # Проверка и фильтрация RSS источников
-├── rss.txt              # Список RSS-лент
-├── requirements.txt     # Зависимости Python
-├── .env.example         # Пример настроек окружения
-└── README.md            # Этот файл 🙂
+├── main.py              # Main async logic
+├── rss.txt              # Optional list of RSS feeds
+├── state.json           # Persistent cache (auto-generated)
+├── parser.log           # Log output
+├── .env                 # Configuration
+└── requirements.txt
 ```
 
 ---
 
-## ⚙️ Зависимости
+## 📜 License
 
-* Python ≥ 3.10
-* `aiohttp`, `feedparser`, `python-dotenv`, `requests`, `asyncio`, `aiogram`
-* Для AI:
-
-  * **Gemini API** (`google-generativeai`)
-  * или **Ollama API** (локальная модель)
+MIT License © 2025 Mytop244
 
 ---
 
-## 🧩 Пример вывода
+## 💡 Tips
 
-```
-✅ https://meduza.io/rss/all
-❌ https://old-dead-feed.com/rss
-```
-
-В Telegram:
-
-```
-🗞 Новость: "Apple представила новые MacBook Pro"
-🧠 Саммари: Компания представила обновлённую линейку ноутбуков с процессорами M4 и новым дизайном...
-```
+* Use `SMART_PAUSE=1` to enable adaptive pauses when models fail
+* Run locally with Ollama for privacy and offline operation
+* Add `ROUND_ROBIN_MODE=1` for fair feed cycling
 
 ---
 
-## 🐳 Docker (опционально)
+### 🧭 Example Output
 
-Можно запустить через Docker:
-
-```bash
-docker build -t telegram-ai-news-bot .
-docker run --env-file .env telegram-ai-news-bot
-```
-
----
-
-## 🧠 Автор
-
-**Winters89**
-📧 Winters89@mail.ru
-💬 Telegram: @dvprokhorov
-
----
-
-## 📜 Лицензия
-
-MIT License © 2025
-Свободно используйте, модифицируйте и распространяйте с указанием автора.
+**Telegram message format:**
 
 ```
+<b>Breaking News Title</b>
+📡 <i>BBC News</i> | 🗓 2025-10-27
+━━━━━━━━━━━━━━━
+💬 AI-generated summary text...
 
+━━━━━━━━━━━━━━━
+🤖 <i>Model: gemini-2.0-flash</i>
+🔗 <a href="https://bbc.co.uk/news/article">Read full article</a>
