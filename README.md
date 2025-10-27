@@ -1,8 +1,3 @@
-Sure — here’s a clean, professional English `README.md` you can put on GitHub for your project 👇
-
----
-
-````markdown
 # 📰 Async Telegram RSS News Bot
 
 A powerful **asynchronous Python bot** that fetches, summarizes, and delivers news from multiple **RSS feeds** directly to a Telegram channel or chat.  
