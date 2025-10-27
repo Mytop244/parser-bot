@@ -185,6 +185,18 @@ def parse_iso_utc(s):
         dt = dt.astimezone(timezone.utc)
     return dt
 
+
+def is_recent(entry):
+    """Возвращает True, если новость опубликована в пределах DAYS_LIMIT дней."""
+    try:
+        if not getattr(entry, "published_parsed", None):
+            return True
+        pub_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        limit_date = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
+        return pub_date >= limit_date
+    except Exception:
+        return True
+
 # ---- state management ----
 state = {"seen": {}, "sent": {}}
 try:
@@ -267,7 +279,12 @@ def mark_state(kind: str, key: str, value):
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
-        asyncio.create_task(save_state_async())
+        # save no more often than once per 10 сек (debounce)
+        last = getattr(mark_state, "_last_save_ts", 0)
+        now_ts = time.time()
+        if now_ts - last >= 10:
+            asyncio.create_task(save_state_async())
+            mark_state._last_save_ts = now_ts
     else:
         try:
             save_state_atomic(state, STATE_FILE)
@@ -350,6 +367,70 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, head_only=False):
 async def fetch_and_check(session, url, head_only=False):
     logging.info(f"🔍 Проверяю источник: {url}")
     res = await fetch_url(session, url, head_only=head_only)
+
+    if head_only:
+        if res:
+            logging.debug(f"✅ Источник доступен: {url}")
+        else:
+            logging.warning(f"⚠️ Источник не отвечает: {url}")
+        return res
+
+    # защита: всегда иметь news, и корректно обрабатывать ошибки загрузки
+    news = []
+
+    if not res:
+        logging.warning(f"⚠️ Источник не отвечает: {url}")
+        return None
+
+    # если fetch_url вернул tuple => это индикатор ошибки/метаданных, не содержимого
+    if isinstance(res, tuple):
+        # res пример: (url, None) или (url, "❌ Error")
+        logging.warning(f"⚠️ Некорректный ответ при загрузке {url}: {res[1] if len(res) > 1 else res[0]}")
+        return None
+
+    logging.debug(f"✅ Источник доступен: {url}")
+    body = res
+
+    # парсинг feedparser в executor (не блокирует event loop)
+    loop = asyncio.get_running_loop()
+    try:
+        feed = await loop.run_in_executor(None, feedparser.parse, body)
+        entries = list(feed.entries)
+    except Exception as e:
+        logging.error(f"⚠️ Ошибка парсинга RSS {url}: {e}")
+        return None
+
+    if not entries:
+        logging.debug(f"⚠️ Пустой фид: {url}")
+        return None
+
+    # уступаем CPU
+    await asyncio.sleep(0)
+
+    old_len = len(entries)
+    entries = [e for e in entries if is_recent(e)]
+    if old_len != len(entries):
+        logging.debug(f"🕓 Отфильтровано {old_len - len(entries)} старых новостей (>{DAYS_LIMIT} дн.)")
+
+    for e in entries:
+        pub = None
+        if getattr(e, "published_parsed", None):
+            pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
+        summary = e.get("summary", "") or e.get("description", "") or ""
+        news.append((
+            e.get("title", "Без заголовка").strip(),
+            e.get("link", "").strip(),
+            feed.feed.get("title", "Неизвестный источник").strip(),
+            summary,
+            pub
+        ))
+
+    new_count = sum(1 for _, link, _, _, _ in news if link not in state.get("seen", {}))
+    logging.info(f"🆕 Найдено {new_count} новых новостей из {len(news)} в источнике: {url}")
+    return news
+
+    logging.info(f"🔍 Проверяю источник: {url}")
+    res = await fetch_url(session, url, head_only=head_only)
     if head_only:
         if res:
             logging.debug(f"✅ Источник доступен: {url}")
@@ -363,20 +444,40 @@ async def fetch_and_check(session, url, head_only=False):
     body = res
     if isinstance(body, tuple):
         body = body[0]
-    feed = feedparser.parse(body)
-    news = []
-    for e in feed.entries:
-        pub = None
-        if getattr(e, "published_parsed", None):
-            pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
-        summary = e.get("summary", "") or e.get("description", "") or ""
-        news.append((
-            e.get("title", "Без заголовка").strip(),
-            e.get("link", "").strip(),
-            feed.feed.get("title", "Неизвестный источник").strip(),
-            summary,
-            pub
-        ))
+        # парсинг feedparser в executor (не блокирует event loop)
+        loop = asyncio.get_running_loop()
+        feed = None
+        try:
+            feed = await loop.run_in_executor(None, feedparser.parse, body)
+            entries = list(feed.entries)
+        except Exception as e:
+            logging.error(f"⚠️ Ошибка парсинга RSS {url}: {e}")
+            return None
+
+        if not entries:
+            logging.debug(f"⚠️ Пустой фид: {url}")
+            return None
+
+        # уступаем CPU
+        await asyncio.sleep(0)
+
+        old_len = len(entries)
+        entries = [e for e in entries if is_recent(e)]
+        if old_len != len(entries):
+            logging.debug(f"🕓 Отфильтровано {old_len - len(entries)} старых новостей (>{DAYS_LIMIT} дн.)")
+        news = []
+        for e in entries:
+            pub = None
+            if getattr(e, "published_parsed", None):
+                pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
+            summary = e.get("summary", "") or e.get("description", "") or ""
+            news.append((
+                e.get("title", "Без заголовка").strip(),
+                e.get("link", "").strip(),
+                feed.feed.get("title", "Неизвестный источник").strip(),
+                summary,
+                pub
+            ))
     new_count = sum(1 for _, link, _, _, _ in news if link not in state.get("seen", {}))
     logging.info(f"🆕 Найдено {new_count} новых новостей из {len(news)} в источнике: {url}")
     return news
@@ -390,19 +491,12 @@ async def extract_article_text(url: str, ssl_context=None, max_length: int = 500
     backoff = 1
     for attempt in range(1, 4):
         try:
-            if session is None:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as s:
-                    async with s.get(url, ssl=ctx) as r:
-                        if r.status != 200:
-                            logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
-                            raise Exception(f"HTTP {r.status}")
-                        html_text = await fetch_text_limited(r, MAX_DOWNLOAD, url)
-            else:
-                async with session.get(url, ssl=ctx, headers=headers) as r:
-                    if r.status != 200:
-                        logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
-                        raise Exception(f"HTTP {r.status}")
-                    html_text = await fetch_text_limited(r, MAX_DOWNLOAD, url)
+            sess = session or await get_session()
+            async with sess.get(url, ssl=ctx, headers=headers) as r:
+                if r.status != 200:
+                    logging.warning(f"⚠️ HTTP {r.status} при загрузке {url}")
+                    raise Exception(f"HTTP {r.status}")
+                html_text = await fetch_text_limited(r, MAX_DOWNLOAD, url)
             break
         except Exception as e:
             logging.debug(f"load attempt {attempt} failed for {url}: {e}")
@@ -778,6 +872,26 @@ async def send_news(session: aiohttp.ClientSession):
 
     if not all_news:
         return
+
+    # Фильтрация по дате: не обрабатываем новости старше DAYS_LIMIT дней
+    limit_date = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
+    before_count = len(all_news)
+    def _is_recent_item(item):
+        # item = (title, link, source, summary, pub)
+        pub = item[4]
+        try:
+            if pub is None:
+                return True
+            if isinstance(pub, datetime):
+                return pub >= limit_date
+            # strings (ISO) or other -> try parse
+            return parse_iso_utc(pub) >= limit_date
+        except Exception:
+            return True
+    all_news = [it for it in all_news if _is_recent_item(it)]
+    filtered = before_count - len(all_news)
+    if filtered:
+        logging.debug(f"🕓 Отфильтровано {filtered} старых новостей (>{DAYS_LIMIT} дн.) из общей очереди")
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
     sent_links = state.get("sent", {})
