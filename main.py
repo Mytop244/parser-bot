@@ -361,6 +361,8 @@ async def fetch_and_check(session, url, head_only=False):
         return []
     logging.debug(f"✅ Источник доступен: {url}")
     body = res
+    if isinstance(body, tuple):
+        body = body[0]
     feed = feedparser.parse(body)
     news = []
     for e in feed.entries:
