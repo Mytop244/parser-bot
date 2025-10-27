@@ -429,59 +429,6 @@ async def fetch_and_check(session, url, head_only=False):
     logging.info(f"🆕 Найдено {new_count} новых новостей из {len(news)} в источнике: {url}")
     return news
 
-    logging.info(f"🔍 Проверяю источник: {url}")
-    res = await fetch_url(session, url, head_only=head_only)
-    if head_only:
-        if res:
-            logging.debug(f"✅ Источник доступен: {url}")
-        else:
-            logging.warning(f"⚠️ Источник не отвечает: {url}")
-        return res
-    if not res:
-        logging.warning(f"⚠️ Источник не отвечает: {url}")
-        return []
-    logging.debug(f"✅ Источник доступен: {url}")
-    body = res
-    if isinstance(body, tuple):
-        body = body[0]
-        # парсинг feedparser в executor (не блокирует event loop)
-        loop = asyncio.get_running_loop()
-        feed = None
-        try:
-            feed = await loop.run_in_executor(None, feedparser.parse, body)
-            entries = list(feed.entries)
-        except Exception as e:
-            logging.error(f"⚠️ Ошибка парсинга RSS {url}: {e}")
-            return None
-
-        if not entries:
-            logging.debug(f"⚠️ Пустой фид: {url}")
-            return None
-
-        # уступаем CPU
-        await asyncio.sleep(0)
-
-        old_len = len(entries)
-        entries = [e for e in entries if is_recent(e)]
-        if old_len != len(entries):
-            logging.debug(f"🕓 Отфильтровано {old_len - len(entries)} старых новостей (>{DAYS_LIMIT} дн.)")
-        news = []
-        for e in entries:
-            pub = None
-            if getattr(e, "published_parsed", None):
-                pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
-            summary = e.get("summary", "") or e.get("description", "") or ""
-            news.append((
-                e.get("title", "Без заголовка").strip(),
-                e.get("link", "").strip(),
-                feed.feed.get("title", "Неизвестный источник").strip(),
-                summary,
-                pub
-            ))
-    new_count = sum(1 for _, link, _, _, _ in news if link not in state.get("seen", {}))
-    logging.info(f"🆕 Найдено {new_count} новых новостей из {len(news)} в источнике: {url}")
-    return news
-
 # ---- article extraction (kept behavior, but reuses passed session when available) ----
 async def extract_article_text(url: str, ssl_context=None, max_length: int = 5000, session: aiohttp.ClientSession | None = None):
     ctx = ssl_context or ssl.create_default_context()
