@@ -42,8 +42,10 @@ NEWS_LIMIT = int(os.environ.get("NEWS_LIMIT", 5))
 INTERVAL = int(os.environ.get("INTERVAL", 600))
 DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
-AI_STUDIO_KEY = os.environ.get("AI_STUDIO_KEY")
-GEMINI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
+
+# Gemini configuration and keys rotation
+GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()]
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_MODEL_FALLBACK = os.environ.get("OLLAMA_MODEL_FALLBACK", "gpt-oss:120b")
 PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH",
@@ -56,6 +58,19 @@ GEMINI_PROMPT = os.getenv("GEMINI_PROMPT",
 OLLAMA_PROMPT = os.getenv("OLLAMA_PROMPT",
     "Не делай вступлений. Сделай резюме новости на русском языке:\n{content}")
 GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", 500))
+
+# --- Gemini key rotation & temporary block support ---
+_gemini_key_lock = asyncio.Lock()
+GEMINI_BLOCK_MINUTES = int(os.getenv("GEMINI_BLOCK_MINUTES", "10"))
+_blocked_keys = {}
+
+def _get_active_keys():
+    now = time.time()
+    return [k for k in GEMINI_KEYS if k not in _blocked_keys or _blocked_keys.get(k, 0) < now]
+
+def _block_key_temporarily(key: str):
+    _blocked_keys[key] = time.time() + GEMINI_BLOCK_MINUTES * 60
+    logging.warning(f"🚫 Ключ временно заблокирован на {GEMINI_BLOCK_MINUTES} мин: {key[:8]}…")
 OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", 500))
 ACTIVE_MODEL = os.getenv("ACTIVE_MODEL", GEMINI_MODEL)
 BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
@@ -616,65 +631,63 @@ async def summarize_ollama(text: str):
     return result, used_model
 
 async def summarize_gemini(text: str, max_tokens: int | None = None):
-    # Reuse global session, apply per-request timeout and env-configured retries
     text = clean_text(text)
     prompt_text = GEMINI_PROMPT.format(content=text[:PARSER_MAX_TEXT_LENGTH])
-    if not AI_STUDIO_KEY:
-        logging.debug("⚠️ AI_STUDIO_KEY не задан, fallback на Ollama")
+
+    if not GEMINI_KEYS:
+        logging.debug("⚠️ GEMINI_KEYS не заданы, fallback на Ollama")
         return await summarize_ollama(text)
 
     # Добавлен лимит токенов (используется значение max_tokens или глобальная константа)
     effective_max = max_tokens if (max_tokens is not None) else GEMINI_MAX_TOKENS
     payload = {
-         "contents": [{"parts": [{"text": prompt_text}]}],
-         "generationConfig": {"maxOutputTokens": int(effective_max)}
-     }
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {"maxOutputTokens": int(effective_max)},
+    }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"Content-Type": "application/json", "x-goog-api-key": AI_STUDIO_KEY}
-
-    GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
-    GEMINI_RETRY_DELAY = int(os.getenv("GEMINI_RETRY_DELAY", "3"))
 
     session = await get_session()
-    for attempt in range(GEMINI_MAX_RETRIES):
-        timeout_value = MODEL_TIMEOUT if attempt < GEMINI_MAX_RETRIES - 1 else None
-        per_request_timeout = aiohttp.ClientTimeout(total=timeout_value)
-        logging.info(f"🧠 [GEMINI INPUT] >>> {prompt_text[:500]} (attempt {attempt+1}/{GEMINI_MAX_RETRIES}) timeout={timeout_value}")
+
+    # rotate keys under lock
+    async with _gemini_key_lock:
+        active = _get_active_keys()
+        if not active:
+            logging.error("❌ Нет доступных ключей Gemini (все временно заблокированы)")
+            return await summarize_ollama(text)
+        meta = state.setdefault("meta", {})
+        idx = int(meta.get("gemini_key_index", 0)) % len(active)
+        key_to_use = active[idx]
+        meta["gemini_key_index"] = (idx + 1) % len(active)
+        asyncio.create_task(save_state_async())
+
+    headers = {"Content-Type": "application/json", "x-goog-api-key": key_to_use}
+
+    total = len(GEMINI_KEYS)
+    blocked = len(_blocked_keys)
+    logging.info(f"🔑 Активных ключей: {len(active)}/{total}, заблокировано: {blocked}")
+
+    for attempt in range(3):
         try:
-            async with session.post(url, json=payload, headers=headers, timeout=per_request_timeout) as resp:
-                body = await resp.text()
-                if resp.status == 200:
-                    try:
-                        result = json.loads(body) if body else {}
-                        candidates = result.get("candidates") if isinstance(result, dict) else None
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            if parts and "text" in parts[0]:
-                                text_out = parts[0]["text"]
-                                logging.info(f"✅ Gemini OK ({GEMINI_MODEL})")
-                                set_last_error("")
-                                return text_out.strip(), GEMINI_MODEL
-                        logging.warning("⚠️ Gemini: 200, но нет валидного candidates — retrying")
-                    except Exception as e:
-                        logging.warning(f"⚠️ Ошибка парсинга Gemini: {e}")
-                        set_last_error(f"Gemini parse error: {e}")
-                elif resp.status == 429:
-                    logging.warning("⚠️ Gemini quota exceeded — fallback to Ollama")
-                    set_last_error("Gemini quota exceeded")
-                    return await summarize_ollama(text)
-                else:
-                    logging.warning(f"⚠️ Gemini HTTP {resp.status}: {body} (attempt {attempt+1})")
-        except asyncio.TimeoutError:
-            logging.warning(f"⏰ Gemini attempt {attempt+1} timed out after {timeout_value}")
-            set_last_error(f"Gemini timeout: {timeout_value}")
+            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=MODEL_TIMEOUT)) as resp:
+                if resp.status in (403, 429):
+                    _block_key_temporarily(key_to_use)
+                    raise RuntimeError(f"ключ временно заблокирован ({resp.status})")
+                resp.raise_for_status()
+                data = await resp.json()
+                candidates = data.get("candidates")
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts and "text" in parts[0]:
+                        text_out = parts[0]["text"]
+                        logging.info(f"✅ Gemini OK ({GEMINI_MODEL})")
+                        set_last_error("")
+                        return text_out.strip(), GEMINI_MODEL
+                logging.warning("⚠️ Gemini: 200, но нет валидного candidates — retrying")
         except Exception as e:
-            logging.warning(f"⚠️ Gemini attempt {attempt+1} failed: {e}")
-            set_last_error(f"Gemini error: {e}")
+            logging.warning(f"⚠️ Ошибка Gemini [{key_to_use[:8]}…] попытка {attempt+1}: {e}")
+            await asyncio.sleep(3)
 
-        if attempt < GEMINI_MAX_RETRIES - 1:
-            await asyncio.sleep(GEMINI_RETRY_DELAY)
-
-    logging.error("❌ Все попытки Gemini неудачны — возврат через Ollama")
+    logging.error("❌ Gemini не ответил после 3 попыток")
     return await summarize_ollama(text)
 
 # ---- sanitization & splitting helpers (centralized) ----
