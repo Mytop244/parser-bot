@@ -884,7 +884,7 @@ async def send_news(session: aiohttp.ClientSession):
     sent_count = 0
     for item in current_batch:
         t, l, s, summary, p = (item if len(item) == 5 else (item[0], item[1], item[2], "", item[3]))
-        if l in state.get("seen", {}):
+        if l in sent_links or l in state.get("seen", {}):
             logging.debug(f"🔁 Пропускаю уже отправленную ссылку: {l}")
             continue
         local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -949,6 +949,13 @@ async def send_news(session: aiohttp.ClientSession):
                 ts_now = int(time.time())
                 mark_state("sent", l, ts_now)
                 mark_state("seen", l, ts_now)
+                # сразу фиксируем в локальной памяти, чтобы не было дублей
+                sent_links[l] = ts_now
+                state.setdefault("seen", {})[l] = ts_now
+                try:
+                    await save_state_async()
+                except Exception:
+                    logging.warning("Не удалось сразу сохранить state после отправки")
                 sent_count += 1
                 logging.info(f"📤 Отправлено: {title_clean[:50]}...")
                 break
