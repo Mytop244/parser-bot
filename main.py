@@ -637,7 +637,12 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
 
     if not GEMINI_KEYS:
         logging.debug("⚠️ GEMINI_KEYS не заданы, fallback на Ollama")
-        return await summarize_ollama(text)
+        fallback_text, fallback_model = await summarize_ollama(text)
+        if fallback_model is None:
+            logging.error("❌ Нет доступных моделей: Gemini отсутствует, Ollama не ответил — сигнал паузы")
+            set_last_error("No model available; pause 1h")
+            return None, "pause_1h"
+        return fallback_text, fallback_model
 
     # Добавлен лимит токенов (используется значение max_tokens или глобальная константа)
     effective_max = max_tokens if (max_tokens is not None) else GEMINI_MAX_TOKENS
@@ -654,7 +659,12 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
         active = _get_active_keys()
         if not active:
             logging.error("❌ Нет доступных ключей Gemini (все временно заблокированы)")
-            return await summarize_ollama(text)
+            fallback_text, fallback_model = await summarize_ollama(text)
+            if fallback_model is None:
+                logging.error("❌ Нет доступных моделей: Gemini отсутствует, Ollama не ответил — сигнал паузы")
+                set_last_error("No model available; pause 1h")
+                return None, "pause_1h"
+            return fallback_text, fallback_model
         meta = state.setdefault("meta", {})
         idx = int(meta.get("gemini_key_index", 0)) % len(active)
         key_to_use = active[idx]
@@ -689,7 +699,12 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
             await asyncio.sleep(3)
 
     logging.error("❌ Gemini не ответил после 3 попыток")
-    return await summarize_ollama(text)
+    fallback_text, fallback_model = await summarize_ollama(text)
+    if fallback_model is None:
+        logging.error("❌ Gemini не ответил и Ollama тоже — сигнал паузы 1ч")
+        set_last_error("No model available; pause 1h")
+        return None, "pause_1h"
+    return fallback_text, fallback_model
 
 # ---- sanitization & splitting helpers (centralized) ----
 def sanitize_summary(summary_raw: str):
@@ -926,6 +941,12 @@ async def send_news(session: aiohttp.ClientSession):
         else:
             logging.info(f"🧩 Используем OLLAMA лимит {OLLAMA_MAX_TOKENS} токенов для {ACTIVE_MODEL}")
             summary_text, used_model = await summarize_ollama(content[:PARSER_MAX_TEXT_LENGTH])
+
+        # 🕒 пауза 1 час при недоступности обеих моделей
+        if used_model == "pause_1h" or (summary_text is None and used_model in (None, "pause_1h")):
+            logging.warning("⏸️ Нет доступных моделей (Gemini заблокирован и Ollama не отвечает). Пауза 1 час.")
+            await asyncio.sleep(3600)
+            continue
 
         MAX_TITLE_LEN = 120
         title_clean = t.strip()
