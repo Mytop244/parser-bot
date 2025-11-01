@@ -626,7 +626,8 @@ async def summarize_ollama(text: str):
         result, used_model = await run_model(OLLAMA_MODEL_FALLBACK)
     if not result:
         set_last_error("Ollama no result")
-        return prompt_text[:2000] + "...", "local-fallback"
+        logging.error("🚫 Отклонено: модель local-fallback не используется для публикаций")
+        return None, None
     set_last_error("")
     return result, used_model
 
