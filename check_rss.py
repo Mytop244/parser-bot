@@ -60,6 +60,22 @@ async def main():
     with open(RSS_FILE, "r", encoding="utf-8") as f:
         raw_lines = [l.rstrip("\n") for l in f.readlines()]
 
+    # --- Удаление дубликатов, сохраняя порядок ---
+    seen_urls = set()
+    unique_lines = []
+    for line in raw_lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            unique_lines.append(line)
+            continue
+        if s not in seen_urls:
+            seen_urls.add(s)
+            unique_lines.append(line)
+        else:
+            logging.info("🧹 Удалён дубликат: %s", s)
+    raw_lines = unique_lines
+
+
     # build list of URLs preserving blank/comment lines and positions
     urls = []
     index_map = []
