@@ -1,7 +1,6 @@
 https://research.google/blog/rss/
 https://www.techbuzz.ai/api/rss/articles
 https://www.nasa.gov/rss/dyn/breaking_news.rss
-http://modis.gsfc.nasa.gov/rss/rss.xml
 https://www.esa.int/rssfeed/TopNews
 https://www.space.com/feeds/all
 https://phys.org/rss-feed/space-news
@@ -24,7 +23,6 @@ https://www.reddit.com/r/programming/.rss
 https://www.smashingmagazine.com/feed/
 https://css-tricks.com/feed/
 https://www.freecodecamp.org/news/rss/
-https://martinfowler.com/feed.atom
 https://marktechpost.com/feed
 https://bair.berkeley.edu/blog/feed.xml
 https://ai-techpark.com/category/ai/feed/
