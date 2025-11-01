@@ -37,7 +37,6 @@ https://roboticmagazine.com/feed
 https://tech.eu/category/robotics/feed
 https://www.sciencedaily.com/rss/computers_math/robotics.xml
 https://androidauthority.com/feed
-# https://coolsmartphone.com/feed
 https://phandroid.com/feed
 https://androidcentral.com/feed
 https://www.nasa.gov/rss/image_of_the_day.rss
