@@ -19,7 +19,6 @@ https://dev.to/feed
 https://news.ycombinator.com/rss
 https://hackaday.com/blog/feed/
 https://stackoverflow.blog/feed/
-https://www.reddit.com/r/programming/.rss
 https://www.smashingmagazine.com/feed/
 https://css-tricks.com/feed/
 https://www.freecodecamp.org/news/rss/
