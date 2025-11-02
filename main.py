@@ -17,6 +17,10 @@ if sys.platform.startswith("win"):
 # ---- CONFIG / ENV ----
 load_dotenv()
 
+# --- concurrency limiter for network calls ---
+CONCURRENCY = int(os.getenv("CONCURRENCY", "10"))
+_network_semaphore = asyncio.Semaphore(CONCURRENCY)
+
 # 🧩 Загружаем список запрещённых слов из .env (case-insensitive, разделитель - запятая)
 BLOCKED_WORDS = [w.strip().lower() for w in os.getenv("BLOCKED_WORDS", "").split(",") if w.strip()]
 
@@ -149,6 +153,12 @@ async def get_session():
         connector = aiohttp.TCPConnector(limit=50, ssl=ssl_ctx, ttl_dns_cache=300)
         _global_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
     return _global_session
+
+
+# --- helper to limit concurrency for network-bound coroutines ---
+async def _limited(coro):
+    async with _network_semaphore:
+        return await coro
 
 # Telegram bot (single instance)
 from telegram.request import HTTPXRequest as Request
@@ -388,7 +398,7 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, head_only=False):
 
 async def fetch_and_check(session, url, head_only=False):
     logging.info(f"🔍 Проверяю источник: {url}")
-    res = await fetch_url(session, url, head_only=head_only)
+    res = await _limited(fetch_url(session, url, head_only=head_only))
 
     if head_only:
         if res:
@@ -586,39 +596,40 @@ async def summarize_ollama(text: str):
         payload = {"model": model_name, "prompt": prompt, "options": {"num_predict": MODEL_MAX_TOKENS}}
         start_time = time.time()
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)) as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)) as resp:
-                    if resp.status != 200:
-                        logging.error(f"⚠️ Ollama {model_name} HTTP {resp.status}")
-                        return None, model_name
-                    text_acc = ""
-                    try:
-                        async for chunk in resp.content:
-                            if not chunk: continue
+            # reuse shared session to avoid recreating many short-lived sessions
+            sess = await get_session()
+            async with sess.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT)) as resp:
+                if resp.status != 200:
+                    logging.error(f"⚠️ Ollama {model_name} HTTP {resp.status}")
+                    return None, model_name
+                text_acc = ""
+                try:
+                    async for chunk in resp.content:
+                        if not chunk: continue
+                        try:
+                            s = chunk.decode("utf-8")
+                        except Exception:
+                            continue
+                        for line in s.splitlines():
+                            line = line.strip()
+                            if not line: continue
                             try:
-                                s = chunk.decode("utf-8")
+                                data = json.loads(line)
                             except Exception:
                                 continue
-                            for line in s.splitlines():
-                                line = line.strip()
-                                if not line: continue
-                                try:
-                                    data = json.loads(line)
-                                except Exception:
-                                    continue
-                                text_acc += data.get("response", "")
-                    except Exception as e:
-                        logging.error(f"❌ Ollama ({model_name}) stream error: {e}")
-                        set_last_error(f"Ollama stream error: {e}")
-                        return None, model_name
-                    output = text_acc.strip()
-                    if not output:
-                        logging.warning(f"⚠️ Ollama ({model_name}) пустой ответ")
-                        return None, model_name
-                    elapsed = round(time.time() - start_time, 2)
-                    logging.info(f"✅ Ollama ({model_name}) за {elapsed} сек")
-                    logging.info(f"🧠 [OLLAMA OUTPUT] <<< {output[:800]}")
-                    return output, model_name
+                            text_acc += data.get("response", "")
+                except Exception as e:
+                    logging.error(f"❌ Ollama ({model_name}) stream error: {e}")
+                    set_last_error(f"Ollama stream error: {e}")
+                    return None, model_name
+                output = text_acc.strip()
+                if not output:
+                    logging.warning(f"⚠️ Ollama ({model_name}) пустой ответ")
+                    return None, model_name
+                elapsed = round(time.time() - start_time, 2)
+                logging.info(f"✅ Ollama ({model_name}) за {elapsed} сек")
+                logging.info(f"🧠 [OLLAMA OUTPUT] <<< {output[:800]}")
+                return output, model_name
         except asyncio.TimeoutError as e:
             logging.error(f"⏰ Ollama ({model_name}) таймаут")
             set_last_error(f"Ollama timeout: {e}")
@@ -926,7 +937,8 @@ async def send_news(session: aiohttp.ClientSession):
         local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
         try:
-            article_text = await extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH, session=session)
+            # limit concurrent article downloads
+            article_text = await _limited(extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH, session=session))
         except Exception as e:
             logging.warning(f"extract_article_text error for {l}: {e}")
             article_text = None
