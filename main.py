@@ -16,6 +16,10 @@ if sys.platform.startswith("win"):
 
 # ---- CONFIG / ENV ----
 load_dotenv()
+
+# 🧩 Загружаем список запрещённых слов из .env (case-insensitive, разделитель - запятая)
+BLOCKED_WORDS = [w.strip().lower() for w in os.getenv("BLOCKED_WORDS", "").split(",") if w.strip()]
+
 STATE_FILE = "state.json"
 LEGACY_SEEN = "seen.json"
 LEGACY_SENT = "sent_links.json"
@@ -927,6 +931,20 @@ async def send_news(session: aiohttp.ClientSession):
             logging.warning(f"extract_article_text error for {l}: {e}")
             article_text = None
 
+        # 🚫 Пропускаем статью, если она содержит запрещённые слова/фразы
+        try:
+            if is_blocked_article(t, article_text or ""):
+                logging.info(f"🚫 Пропущено из-за запрещённых слов: {t}")
+                ts_now = int(time.time())
+                mark_state("seen", l, ts_now)
+                mark_state("sent", l, ts_now)
+                sent_links[l] = ts_now
+                state.setdefault("seen", {})[l] = ts_now
+                continue
+        except Exception:
+            # защитный проход: при ошибке проверки продолжаем обработку
+            logging.debug("Ошибка при проверке BLOCKED_WORDS, продолжаем обработку")
+
         def is_text_relevant(title: str, text: str, min_words: int = 3) -> bool:
             title_words = [w.lower() for w in re.findall(r'\w+', title)]
             text_lower = (text or "").lower()
@@ -955,6 +973,18 @@ async def send_news(session: aiohttp.ClientSession):
             text_lower = text.lower()
             matches = sum(1 for w in title_words if w in text_lower)
             return matches >= min_title_matches
+
+
+        # ---------- Проверка на запрещённые слова ----------
+        def is_blocked_article(title: str, text: str) -> bool:
+            """Возвращает True, если заголовок или текст содержит любое слово/фразу из BLOCKED_WORDS."""
+            if not BLOCKED_WORDS:
+                return False
+            combined = f"{title or ''} {text or ''}".lower()
+            for bad in BLOCKED_WORDS:
+                if bad and bad in combined:
+                    return True
+            return False
 
         # ---------- Выбор контента для модели ----------
         # 1) используем полный текст, если он информативен по эвристике
