@@ -50,6 +50,9 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_MODEL_FALLBACK = os.environ.get("OLLAMA_MODEL_FALLBACK", "gpt-oss:120b")
 PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH",
                                            os.environ.get("MAX_TEXT_LENGTH", "10000")))
+MIN_ARTICLE_WORDS = int(os.environ.get("MIN_ARTICLE_WORDS", "50"))
+MIN_TITLE_WORDS = int(os.environ.get("MIN_TITLE_WORDS", "5"))
+MIN_TITLE_MATCHES = int(os.environ.get("MIN_TITLE_MATCHES", "3"))
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 180))
 MODEL_MAX_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 1200))
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
@@ -930,7 +933,49 @@ async def send_news(session: aiohttp.ClientSession):
             count = sum(1 for w in title_words if w in text_lower)
             return count >= min_words
 
-        content = article_text if article_text and len(article_text) >= 300 and is_text_relevant(t, article_text) else t
+
+        # ---------- Проверка информативности статьи ----------
+        def is_informative(title: str, text: str,
+                           min_words: int = MIN_ARTICLE_WORDS,
+                           min_title_matches: int = MIN_TITLE_MATCHES) -> bool:
+            """
+            Эвристика: статья считается информативной, если:
+            - содержит >= min_words слов
+            - или заголовок встречается в тексте не менее min_title_matches раз
+            Отбрасывает технические/пустые записи.
+            """
+            if not text:
+                return False
+            words = re.findall(r'\w+', text)
+            if len(words) >= min_words:
+                return True
+            title_words = [w.lower() for w in re.findall(r'\w+', title) if len(w) > 2]
+            if not title_words:
+                return False
+            text_lower = text.lower()
+            matches = sum(1 for w in title_words if w in text_lower)
+            return matches >= min_title_matches
+
+        # ---------- Выбор контента для модели ----------
+        # 1) используем полный текст, если он информативен по эвристике
+        # 2) иначе — используем только заголовок, если он не слишком короткий
+        # 3) иначе — пропускаем новость и помечаем как просмотренную/отправленную
+        use_article = article_text and is_informative(t, article_text)
+        if use_article:
+            content = article_text[:PARSER_MAX_TEXT_LENGTH]
+        else:
+            title_word_count = len(re.findall(r'\w+', t))
+            if title_word_count >= MIN_TITLE_WORDS:
+                content = t
+            else:
+                logging.info(f"⏭️ Пропускаю неинформативную/очень короткую новость: {l}")
+                ts_now = int(time.time())
+                mark_state("seen", l, ts_now)
+                mark_state("sent", l, ts_now)
+                sent_links[l] = ts_now
+                state.setdefault("seen", {})[l] = ts_now
+                continue
+
         content = content[:PARSER_MAX_TEXT_LENGTH]
         logging.debug(f"📝 Контент для модели ({len(content)} символов)")
 
