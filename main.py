@@ -1,5 +1,6 @@
 import os, sys, json, time, asyncio, ssl, logging, tempfile, re, html, calendar
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
 from functools import partial
 from dotenv import load_dotenv
@@ -104,7 +105,7 @@ def _get_active_keys():
 
 def _block_key_temporarily(key: str):
     _blocked_keys[key] = time.time() + GEMINI_BLOCK_MINUTES * 60
-    logging.warning(f"🚫 Ключ временно заблокирован на {GEMINI_BLOCK_MINUTES} мин: {key[:8]}…")
+    logging.warning(f"🚫 Ключ временно заблокирован на {GEMINI_BLOCK_MINUTES} мин: ****{key[-4:]}")
 OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", 500))
 ACTIVE_MODEL = os.getenv("ACTIVE_MODEL", GEMINI_MODEL)
 BATCH_SIZE_SMALL = int(os.environ.get("BATCH_SIZE_SMALL", 5))
@@ -136,27 +137,47 @@ if hasattr(time, "tzset"):
     os.environ["TZ"] = os.environ.get("TIMEZONE", "UTC")
     time.tzset()
 
+# --- TIMEZONE CONFIG ---
+APP_TZ_NAME = os.getenv("TIMEZONE", "UTC")
+try:
+    APP_TZ = ZoneInfo(APP_TZ_NAME)
+except Exception:
+    APP_TZ = timezone.utc
+    logging.warning(f"⚠️ Некорректная TIMEZONE={APP_TZ_NAME}, использую UTC")
+
+
 if not TELEGRAM_TOKEN or not CHAT_ID:
     sys.exit("❌ TELEGRAM_TOKEN или CHAT_ID не заданы")
 if not RSS_URLS:
     sys.exit("❌ RSS_URLS не заданы")
 
-# --- logging (kept similar) ---
+# --- logging (safe version) ---
 LOG_FILE = "parser.log"
 os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
+
 formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(formatter)
 file_handler.setLevel(logging.INFO)
+
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
+
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
-root_logger.addHandler(console_handler)
-root_logger.addHandler(file_handler)
+
+# ✅ предотвращаем дублирование логов
+if not root_logger.handlers:
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
 model_logger = logging.getLogger("model")
 model_logger.setLevel(logging.INFO)
-model_logger.addHandler(console_handler); model_logger.addHandler(file_handler); model_logger.propagate=False
+if not model_logger.handlers:
+    model_logger.addHandler(console_handler)
+    model_logger.addHandler(file_handler)
+model_logger.propagate = False
 
 # --- SSL ---
 SSL_VERIFY = os.getenv("SSL_VERIFY", "1") not in ("0", "false", "False")
@@ -215,7 +236,7 @@ def clean_text(text: str) -> str:
 
 def parse_iso_utc(s):
     if isinstance(s, datetime):
-        return s.astimezone(timezone.utc)
+        return s.astimezone(APP_TZ)
     if not s:
         raise ValueError("empty date")
     s = s.strip()
@@ -235,9 +256,9 @@ def parse_iso_utc(s):
         if dt is None:
             raise ValueError(f"Неверный формат даты: {s}")
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=APP_TZ)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(APP_TZ)
     return dt
 
 
@@ -246,8 +267,8 @@ def is_recent(entry):
     try:
         if not getattr(entry, "published_parsed", None):
             return True
-        pub_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        limit_date = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
+        pub_date = datetime(*entry.published_parsed[:6], tzinfo=APP_TZ)
+        limit_date = datetime.now(APP_TZ) - timedelta(days=DAYS_LIMIT)
         return pub_date >= limit_date
     except Exception:
         return True
@@ -315,7 +336,7 @@ def mark_state(kind: str, key: str, value):
     if isinstance(value, (int, float)):
         ts = int(value)
     elif isinstance(value, datetime):
-        ts = int(value.astimezone(timezone.utc).timestamp())
+        ts = int(value.astimezone(APP_TZ).timestamp())
     elif isinstance(value, str):
         try:
             dt = parse_iso_utc(value)
@@ -470,7 +491,7 @@ async def fetch_and_check(session, url, head_only=False):
     for e in entries:
         pub = None
         if getattr(e, "published_parsed", None):
-            pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=timezone.utc)
+            pub = datetime.fromtimestamp(calendar.timegm(e.published_parsed), tz=APP_TZ)
         summary = e.get("summary", "") or e.get("description", "") or ""
         news.append((
             e.get("title", "Без заголовка").strip(),
@@ -582,28 +603,13 @@ async def feed_to_items(feed_url):
 # --- Быстрое закрытие сессии при выходе ---
 @atexit.register
 def _close_session():
+    global _global_session
     try:
-        global _global_session
-        if not _global_session:
-            return
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
+        if _global_session and not _global_session.closed:
             try:
-                loop.call_soon_threadsafe(lambda: asyncio.create_task(_global_session.close()))
+                _global_session.close()
             except Exception:
                 pass
-        else:
-            try:
-                asyncio.run(_global_session.close())
-            except Exception:
-                try:
-                    _global_session.close()
-                except Exception:
-                    pass
     except Exception:
         pass
 
@@ -860,7 +866,7 @@ async def send_news(session: aiohttp.ClientSession):
                         try: p_dt = parse_iso_utc(p)
                         except Exception: p_dt = None
                     elif isinstance(p, datetime):
-                        p_dt = p.astimezone(timezone.utc) if p.tzinfo else p.replace(tzinfo=timezone.utc)
+                        p_dt = p.astimezone(APP_TZ) if p.tzinfo else p.replace(tzinfo=APP_TZ)
                     all_news.append((t, l, s, "", p_dt))
                 elif len(item) == 5:
                     t, l, s, summary, p = item
@@ -869,7 +875,7 @@ async def send_news(session: aiohttp.ClientSession):
                         try: p_dt = parse_iso_utc(p)
                         except Exception: p_dt = None
                     elif isinstance(p, datetime):
-                        p_dt = p.astimezone(timezone.utc) if p.tzinfo else p.replace(tzinfo=timezone.utc)
+                        p_dt = p.astimezone(APP_TZ) if p.tzinfo else p.replace(tzinfo=APP_TZ)
                     all_news.append((t, l, s, summary, p_dt))
             try: os.remove("news_queue.json")
             except Exception: pass
@@ -891,7 +897,7 @@ async def send_news(session: aiohttp.ClientSession):
         return
 
     # Фильтрация по дате: не обрабатываем новости старше DAYS_LIMIT дней
-    limit_date = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
+    limit_date = datetime.now(APP_TZ) - timedelta(days=DAYS_LIMIT)
     before_count = len(all_news)
     def _is_recent_item(item):
         # item = (title, link, source, summary, pub)
@@ -910,7 +916,7 @@ async def send_news(session: aiohttp.ClientSession):
     if filtered:
         logging.debug(f"🕓 Отфильтровано {filtered} старых новостей (>{DAYS_LIMIT} дн.) из общей очереди")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_LIMIT)
+    cutoff = datetime.now(APP_TZ) - timedelta(days=DAYS_LIMIT)
     sent_links = state.get("sent", {})
     last_index = state.get("meta", {}).get("last_source_index", 0)
 
@@ -928,7 +934,7 @@ async def send_news(session: aiohttp.ClientSession):
     sent_links = clean_sent
 
     # prepare ordering (round-robin or by date)
-    MIN_DT = datetime.fromtimestamp(0, tz=timezone.utc)
+    MIN_DT = datetime.fromtimestamp(0, tz=APP_TZ)
     if ROUND_ROBIN_MODE:
         sources = defaultdict(deque)
         for t, l, s, summary, p in sorted(all_news, key=lambda x: x[4] or MIN_DT, reverse=True):
@@ -957,7 +963,7 @@ async def send_news(session: aiohttp.ClientSession):
         if l in sent_links or l in state.get("seen", {}):
             logging.debug(f"🔁 Пропускаю уже отправленную ссылку: {l}")
             continue
-        local_time = (p or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        local_time = (p or datetime.now(APP_TZ)).astimezone(APP_TZ)
         local_time_str = local_time.strftime("%d.%m.%Y, %H:%M")
         try:
             # limit concurrent article downloads
@@ -1113,7 +1119,14 @@ async def send_news(session: aiohttp.ClientSession):
                 if isinstance(pp, str):
                     try: pp = parse_iso_utc(pp)
                     except Exception: pass
-                iso_p = pp.isoformat() if hasattr(pp, "isoformat") else (None if pp is None else str(pp))
+                # ensure saved ISO includes timezone info in APP_TZ
+                if isinstance(pp, datetime):
+                    try:
+                        iso_p = pp.astimezone(APP_TZ).isoformat()
+                    except Exception:
+                        iso_p = pp.isoformat()
+                else:
+                    iso_p = pp.isoformat() if hasattr(pp, "isoformat") else (None if pp is None else str(pp))
                 safe_queue.append((tt, ll, ss, summ, iso_p))
             try:
                 with open("news_queue.json", "w", encoding="utf-8") as f:
@@ -1184,11 +1197,11 @@ async def check_sources(urls=None):
         logging.info(f"  {s} — {u}")
 
 async def main():
-    last_check = datetime.now(timezone.utc)
+    last_check = datetime.now(APP_TZ)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         try:
             while True:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(APP_TZ)
                 if (now - last_check) > timedelta(days=1):
                     await check_sources()
                     last_check = now
@@ -1199,7 +1212,10 @@ async def main():
                     logging.warning("⏰ send_news превысил лимит времени и был прерван")
                 except Exception as e:
                     logging.exception(f"❌ Ошибка в send_news: {e}")
-                logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин (или пауза по state.meta)")
+                if state.get("meta", {}).get("pause_until"):
+                    logging.info("⏰ Следующая проверка — отложена (активна пауза по state.meta)")
+                else:
+                    logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин")
                 print("💤 цикл завершён, жду следующий", flush=True)
                 # Сначала проверяем, не установлена ли глобальная пауза от send_news
                 pause_until = state.get("meta", {}).get("pause_until")
@@ -1209,7 +1225,7 @@ async def main():
                     except Exception:
                         remaining = 0
                     if remaining > 0:
-                        dt = datetime.fromtimestamp(pause_until, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+                        dt = datetime.fromtimestamp(pause_until, tz=APP_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
                         logging.info(f"⏸️ Глобальная пауза активна до {dt} (осталось {remaining} сек).")
                         await asyncio.sleep(remaining)
                     # очистим метку паузы и сохраним state
