@@ -10,6 +10,29 @@ from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut, NetworkError
 
+
+# --- Blocked words helper (модульная функция) ---
+def is_blocked_article(title: str, text: str, blocked_words: list | None = None) -> bool:
+    """Возвращает True, если статья содержит любое запрещённое слово или фразу."""
+    bw = blocked_words if blocked_words is not None else BLOCKED_WORDS
+    if not bw:
+        return False
+    combined = f"{title or ''} {text or ''}".casefold()
+    for bad in bw:
+        b = (bad or "").strip()
+        if not b:
+            continue
+        try:
+            # ищем по границам слов
+            if re.search(r'\b' + re.escape(b) + r'\b', combined, flags=re.IGNORECASE):
+                logging.info(f"🚫 Блокировка статьи по слову: '{b}'")
+                return True
+        except re.error:
+            # fallback — простая подстрока
+            if b in combined:
+                return True
+    return False
+
 # Windows event loop policy
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -944,18 +967,14 @@ async def send_news(session: aiohttp.ClientSession):
             article_text = None
 
         # 🚫 Пропускаем статью, если она содержит запрещённые слова/фразы
-        try:
-            if is_blocked_article(t, article_text or ""):
-                logging.info(f"🚫 Пропущено из-за запрещённых слов: {t}")
-                ts_now = int(time.time())
-                mark_state("seen", l, ts_now)
-                mark_state("sent", l, ts_now)
-                sent_links[l] = ts_now
-                state.setdefault("seen", {})[l] = ts_now
-                continue
-        except Exception:
-            # защитный проход: при ошибке проверки продолжаем обработку
-            logging.debug("Ошибка при проверке BLOCKED_WORDS, продолжаем обработку")
+        if is_blocked_article(t, article_text or ""):
+            logging.info(f"🚫 Пропущено из-за запрещённых слов: {t}")
+            ts_now = int(time.time())
+            mark_state("seen", l, ts_now)
+            mark_state("sent", l, ts_now)
+            sent_links[l] = ts_now
+            state.setdefault("seen", {})[l] = ts_now
+            continue
 
         def is_text_relevant(title: str, text: str, min_words: int = 3) -> bool:
             title_words = [w.lower() for w in re.findall(r'\w+', title)]
@@ -985,18 +1004,6 @@ async def send_news(session: aiohttp.ClientSession):
             text_lower = text.lower()
             matches = sum(1 for w in title_words if w in text_lower)
             return matches >= min_title_matches
-
-
-        # ---------- Проверка на запрещённые слова ----------
-        def is_blocked_article(title: str, text: str) -> bool:
-            """Возвращает True, если заголовок или текст содержит любое слово/фразу из BLOCKED_WORDS."""
-            if not BLOCKED_WORDS:
-                return False
-            combined = f"{title or ''} {text or ''}".lower()
-            for bad in BLOCKED_WORDS:
-                if bad and bad in combined:
-                    return True
-            return False
 
         # ---------- Выбор контента для модели ----------
         # 1) используем полный текст, если он информативен по эвристике
