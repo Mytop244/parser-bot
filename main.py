@@ -1036,11 +1036,15 @@ async def send_news(session: aiohttp.ClientSession):
             logging.info(f"🧩 Используем OLLAMA лимит {OLLAMA_MAX_TOKENS} токенов для {ACTIVE_MODEL}")
             summary_text, used_model = await summarize_ollama(content[:PARSER_MAX_TEXT_LENGTH])
 
-        # 🕒 пауза 1 час при недоступности обеих моделей
+        # 🕒 если моделей нет — отмечаем паузу 1 час и выходим из send_news
         if used_model == "pause_1h" or (summary_text is None and used_model in (None, "pause_1h")):
-            logging.warning("⏸️ Нет доступных моделей (Gemini заблокирован и Ollama не отвечает). Пауза 1 час.")
-            await asyncio.sleep(3600)
-            continue
+            logging.warning("⏸️ Нет доступных моделей (Gemini заблокирован и Ollama не отвечает). Устанавливаю паузу 1 час и выхожу.")
+            state.setdefault("meta", {})["pause_until"] = int(time.time() + 3600)
+            try:
+                await save_state_async()
+            except Exception:
+                logging.debug("Не удалось сразу сохранить state при установке pause_until")
+            return
 
         MAX_TITLE_LEN = 120
         title_clean = t.strip()
@@ -1195,9 +1199,28 @@ async def main():
                     logging.warning("⏰ send_news превысил лимит времени и был прерван")
                 except Exception as e:
                     logging.exception(f"❌ Ошибка в send_news: {e}")
-                logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин\n")
+                logging.info(f"⏰ Следующая проверка через {INTERVAL // 60} мин (или пауза по state.meta)")
                 print("💤 цикл завершён, жду следующий", flush=True)
-                # 💤 адаптивная пауза при ошибках модели
+                # Сначала проверяем, не установлена ли глобальная пауза от send_news
+                pause_until = state.get("meta", {}).get("pause_until")
+                if pause_until:
+                    try:
+                        remaining = int(pause_until - time.time())
+                    except Exception:
+                        remaining = 0
+                    if remaining > 0:
+                        dt = datetime.fromtimestamp(pause_until, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+                        logging.info(f"⏸️ Глобальная пауза активна до {dt} (осталось {remaining} сек).")
+                        await asyncio.sleep(remaining)
+                    # очистим метку паузы и сохраним state
+                    try:
+                        state.setdefault("meta", {}).pop("pause_until", None)
+                        await save_state_async()
+                    except Exception:
+                        logging.debug("Не удалось сохранить state после снятия pause_until")
+                    # после ожидания продолжаем следующий цикл сразу
+                    continue
+                # 💤 адаптивная пауза при ошибках модели (обычный путь)
                 delay = INTERVAL
                 try:
                     if isinstance(last_error, str) and ("Gemini 503" in last_error or "Service Unavailable" in last_error):
