@@ -1199,14 +1199,16 @@ async def check_sources(urls=None):
 async def main():
     last_check = datetime.now(APP_TZ)
     # ⏱️ Таймаут подстраивается под активную модель:
-    # Если используется Ollama — ждем в 2 раза дольше, чем Gemini.
+    # Ollama — без ограничений, Gemini и другие — стандартно.
     if "ollama" in (ACTIVE_MODEL or "").lower():
-        base_timeout = INTERVAL * 2
-        logging.info(f"⏳ Используется Ollama — увеличен лимит ожидания до {base_timeout} сек")
+        base_timeout = None
+        logging.info("🧠 Используется Ollama — ожидание без лимита времени")
+        client_timeout = aiohttp.ClientTimeout(total=None)
     else:
         base_timeout = INTERVAL
+        client_timeout = aiohttp.ClientTimeout(total=base_timeout)
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=base_timeout)) as session:
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
         try:
             while True:
                 now = datetime.now(APP_TZ)
@@ -1215,7 +1217,11 @@ async def main():
                     last_check = now
                 logging.info("🔄 Проверка новостей...")
                 try:
-                    await asyncio.wait_for(send_news(session), timeout=base_timeout)
+                    if base_timeout is None:
+                        await send_news(session)  # Ollama — без ограничений
+                    else:
+                        await asyncio.wait_for(send_news(session), timeout=base_timeout)
+
                 except asyncio.TimeoutError:
                     logging.warning("⏰ send_news превысил лимит времени и был прерван")
                 except Exception as e:
