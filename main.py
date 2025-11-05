@@ -721,8 +721,14 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
     headers = {"Content-Type": "application/json", "x-goog-api-key": key_to_use}
 
     total = len(GEMINI_KEYS)
-    blocked = len(_blocked_keys)
-    logging.info(f"🔑 Активных ключей: {len(active)}/{total}, заблокировано: {blocked}")
+    now = time.time()
+    # удаляем истёкшие блокировки
+    expired = [k for k, v in _blocked_keys.items() if v <= now]
+    for k in expired:
+        _blocked_keys.pop(k, None)
+    # считаем только активные блокировки
+    blocked_current = len(_blocked_keys)
+    logging.info(f"🔑 Активных ключей: {len(active)}/{total}, временно заблокировано: {blocked_current}")
 
     for attempt in range(3):
         try:
