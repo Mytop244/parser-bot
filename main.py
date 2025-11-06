@@ -730,12 +730,31 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
     blocked_current = len(_blocked_keys)
     logging.info(f"🔑 Активных ключей: {len(active)}/{total}, временно заблокировано: {blocked_current}")
 
-    for attempt in range(3):
+    attempts = 0
+    while attempts < 3:
+        async with _gemini_key_lock:
+            active = _get_active_keys()
+            if not active:
+                logging.error("❌ Нет доступных ключей Gemini (все временно заблокированы)")
+                fallback_text, fallback_model = await summarize_ollama(text)
+                if fallback_model is None:
+                    logging.error("❌ Нет доступных моделей: Gemini отсутствует, Ollama не ответил — сигнал паузы")
+                    set_last_error("No model available; pause 1h")
+                    return None, "pause_1h"
+                return fallback_text, fallback_model
+            idx = int(state.setdefault("meta", {}).get("gemini_key_index", 0)) % len(active)
+            key_to_use = active[idx]
+            state["meta"]["gemini_key_index"] = (idx + 1) % len(active)
+            asyncio.create_task(save_state_async())
+
+        headers = {"Content-Type": "application/json", "x-goog-api-key": key_to_use}
         try:
             async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=MODEL_TIMEOUT)) as resp:
                 if resp.status in (403, 429):
                     _block_key_temporarily(key_to_use)
-                    raise RuntimeError(f"ключ временно заблокирован ({resp.status})")
+                    logging.warning(f"🚫 Ключ временно заблокирован: {key_to_use[:8]}…")
+                    attempts += 1
+                    continue  # теперь работает правильно
                 resp.raise_for_status()
                 data = await resp.json()
                 candidates = data.get("candidates")
@@ -748,8 +767,10 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
                         return text_out.strip(), GEMINI_MODEL
                 logging.warning("⚠️ Gemini: 200, но нет валидного candidates — retrying")
         except Exception as e:
-            logging.warning(f"⚠️ Ошибка Gemini [{key_to_use[:8]}…] попытка {attempt+1}: {e}")
+            logging.warning(f"⚠️ Ошибка Gemini [{key_to_use[:8]}…] попытка {attempts+1}: {e}")
+            attempts += 1
             await asyncio.sleep(3)
+
 
     logging.error("❌ Gemini не ответил после 3 попыток")
     fallback_text, fallback_model = await summarize_ollama(text)
