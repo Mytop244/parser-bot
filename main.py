@@ -93,6 +93,7 @@ GEMINI_PROMPT = os.getenv("GEMINI_PROMPT",
 OLLAMA_PROMPT = os.getenv("OLLAMA_PROMPT",
     "Не делай вступлений. Сделай резюме новости на русском языке:\n{content}")
 GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", 500))
+MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", 3))  # 3 — значение по умолчанию
 
 # --- Gemini key rotation & temporary block support ---
 _gemini_key_lock = asyncio.Lock()
@@ -731,7 +732,7 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
     logging.info(f"🔑 Активных ключей: {len(active)}/{total}, временно заблокировано: {blocked_current}")
 
     attempts = 0
-    while attempts < 3:
+    while attempts < MAX_ATTEMPTS:
         async with _gemini_key_lock:
             active = _get_active_keys()
             if not active:
