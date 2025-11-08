@@ -773,7 +773,7 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
             await asyncio.sleep(3)
 
 
-    logging.error("❌ Gemini не ответил после 3 попыток")
+    logging.error("❌ Gemini не ответил после попыток")
     fallback_text, fallback_model = await summarize_ollama(text)
     if fallback_model is None:
         logging.error("❌ Gemini не ответил и Ollama тоже — сигнал паузы 1ч")
