@@ -15,7 +15,6 @@ https://www.sciencedaily.com/rss/all.xml
 https://www.sciencedaily.com/rss/top/science.xml
 https://scipost.org/rss/news/
 https://newatlas.com/science/index.rss
-
 https://news.ycombinator.com/rss
 https://hackaday.com/blog/feed/
 https://stackoverflow.blog/feed/
