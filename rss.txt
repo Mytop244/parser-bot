@@ -1,39 +1,47 @@
+# 🧠 Искусственный интеллект и технологии
 https://research.google/blog/rss/
 https://www.techbuzz.ai/api/rss/articles
-https://www.nasa.gov/rss/dyn/breaking_news.rss
-https://www.esa.int/rssfeed/TopNews
-https://www.space.com/feeds/all
-https://phys.org/rss-feed/space-news
-https://www.tomshardware.com/rss
-https://hothardware.com/rss
-https://www.sciencedaily.com/rss/top/technology.xml
-# https://kotaku.com/rss
-https://www.polygon.com/rss/index.xml
-https://www.gamespot.com/feeds/mashup
-https://store.steampowered.com/feeds/news.xml
-https://www.sciencedaily.com/rss/all.xml
-https://www.sciencedaily.com/rss/top/science.xml
-https://scipost.org/rss/news/
-https://newatlas.com/science/index.rss
+https://marktechpost.com/feed
+https://bair.berkeley.edu/blog/feed.xml
+https://ai-techpark.com/category/ai/feed/
+https://www.amazon.science/index.rss
 https://news.ycombinator.com/rss
 https://hackaday.com/blog/feed/
 https://stackoverflow.blog/feed/
 https://www.smashingmagazine.com/feed/
 https://css-tricks.com/feed/
 https://www.freecodecamp.org/news/rss/
-https://marktechpost.com/feed
-https://bair.berkeley.edu/blog/feed.xml
-https://ai-techpark.com/category/ai/feed/
-# https://aws.amazon.com/blogs/machine-learning/feed
-https://www.amazon.science/index.rss
-https://robohub.org/feed
-https://blog.robotiq.com/rss.xml
-https://newatlas.com/robotics/index.rss
-https://roboticmagazine.com/feed
-https://tech.eu/category/robotics/feed
-https://www.sciencedaily.com/rss/computers_math/robotics.xml
-https://androidauthority.com/feed
-https://phandroid.com/feed
-https://androidcentral.com/feed
-https://www.nasa.gov/rss/image_of_the_day.rss
-https://astronomy.com/feed
+https://www.sciencedaily.com/rss/top/technology.xml
+
+# 🤖 Робототехника
+#https://robohub.org/feed
+#https://blog.robotiq.com/rss.xml
+#https://newatlas.com/robotics/index.rss
+#https://roboticmagazine.com/feed
+#https://tech.eu/category/robotics/feed
+#https://www.sciencedaily.com/rss/computers_math/robotics.xml
+
+# 🚀 Космос и наука
+#https://www.nasa.gov/rss/dyn/breaking_news.rss
+#https://www.esa.int/rssfeed/TopNews
+#https://www.space.com/feeds/all
+#https://phys.org/rss-feed/space-news
+#https://www.nasa.gov/rss/image_of_the_day.rss
+#https://astronomy.com/feed
+#https://www.sciencedaily.com/rss/all.xml
+#https://www.sciencedaily.com/rss/top/science.xml
+#https://newatlas.com/science/index.rss
+#https://scipost.org/rss/news/
+
+# 🎮 Игры и развлечения
+#https://www.tomshardware.com/rss
+#https://hothardware.com/rss
+#https://www.polygon.com/rss/index.xml
+#https://www.gamespot.com/feeds/mashup
+#https://store.steampowered.com/feeds/news.xml
+#https://kotaku.com/rss
+
+# 📱 Android и мобильные технологии
+#https://androidauthority.com/feed
+#https://phandroid.com/feed
+#https://androidcentral.com/feed
