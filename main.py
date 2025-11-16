@@ -38,6 +38,15 @@ def is_blocked_article(title: str, text: str, blocked_words: list | None = None)
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+BASE_DIR = os.path.dirname(
+    sys.executable if getattr(sys, 'frozen', False) else __file__
+)
+
+def fix_path(name: str) -> str:
+    return os.path.join(BASE_DIR, name)
+
+
+
 # ---- CONFIG / ENV ----
 load_dotenv()
 
@@ -48,7 +57,7 @@ _network_semaphore = asyncio.Semaphore(CONCURRENCY)
 # 🧩 Загружаем список запрещённых слов из .env (case-insensitive, разделитель - запятая)
 BLOCKED_WORDS = [w.strip().lower() for w in os.getenv("BLOCKED_WORDS", "").split(",") if w.strip()]
 
-STATE_FILE = "state.json"
+STATE_FILE = fix_path("state.json")
 LEGACY_SEEN = "seen.json"
 LEGACY_SENT = "sent_links.json"
 
