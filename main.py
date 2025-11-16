@@ -157,9 +157,9 @@ except Exception:
 
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    sys.exit("❌ TELEGRAM_TOKEN или CHAT_ID не заданы")
+    raise RuntimeError("❌ TELEGRAM_TOKEN или CHAT_ID не заданы. Установите переменные окружения.")
 if not RSS_URLS:
-    sys.exit("❌ RSS_URLS не заданы")
+    raise RuntimeError("❌ RSS_URLS не заданы. Установите RSS_URLS или rss.txt.")
 
 # --- logging (safe version) ---
 LOG_FILE = "parser.log"
@@ -277,7 +277,9 @@ def is_recent(entry):
     try:
         if not getattr(entry, "published_parsed", None):
             return True
-        pub_date = datetime(*entry.published_parsed[:6], tzinfo=APP_TZ)
+        # published_parsed — struct_time (UTC) → корректно переводим в datetime с tz
+        pub_ts = calendar.timegm(entry.published_parsed)
+        pub_date = datetime.fromtimestamp(pub_ts, tz=APP_TZ)
         limit_date = datetime.now(APP_TZ) - timedelta(days=DAYS_LIMIT)
         return pub_date >= limit_date
     except Exception:
