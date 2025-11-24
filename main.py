@@ -65,7 +65,7 @@ raw_chat = os.environ.get("CHAT_ID")
 CHAT_ID = int(raw_chat) if raw_chat not in (None, "") else None
 
 _env_rss = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
-RSS_FILE = os.path.join(os.path.dirname(__file__) or '.', 'rss.txt')
+RSS_FILE = fix_path("rss.txt")  # Используем fix_path, как для логов и БД
 RSS_URLS = _env_rss
 if os.path.exists(RSS_FILE):
     try:
