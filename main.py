@@ -461,7 +461,12 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
         return await summarize_ollama(text)
 
     eff_max = max_tokens or GEMINI_MAX_TOKENS
+        
+    # Системная инструкция для подавления "болтливости" модели
+    sys_instr = "Ты — API для генерации JSON/HTML. Твоя единственная задача — вернуть текст резюме. ЗАПРЕЩЕНО: вступления, приветствия, фразы 'Вот резюме', 'В статье'. Начинай сразу с первого предложения новости."
+
     payload = {
+        "system_instruction": {"parts": [{"text": sys_instr}]},
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {"maxOutputTokens": int(eff_max)},
     }
@@ -503,6 +508,14 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
 # --- UTILS ---
 
 def sanitize_summary(s: str):
+    # Убираем мусорные вступления
+    garbage = [
+        r'^(?:конечно[,:]?|вот|держи|итак[,:]?)\s*',
+        r'^(?:вот|ниже)?\s*(?:краткое)?\s*резюме[:\.]?\s*',
+        r'^в\s+статье\s+(?:говорится|рассказывается|речь идет)\s+(?:о|том, что)?\s*',
+    ]
+    for g in garbage:
+        s = re.sub(g, '', s, flags=re.IGNORECASE | re.MULTILINE).strip()
     if not s: return ""
     s = re.sub(r'(?m)^[\s]*[\*\-\u2013]\s+', '• ', s)
     s = re.sub(r'\*\*([^\n*]+)\*\*', r'<b>\1</b>', s)
