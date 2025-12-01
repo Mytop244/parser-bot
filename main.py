@@ -316,6 +316,27 @@ def is_blocked_article(title: str, text: str, blocked_words: list | None = None)
             if bad in combined: return True
     return False
 
+def validate_content_relevance(title: str, text: str) -> bool:
+    """
+    Проверяет, соответствует ли текст заголовку.
+    Возвращает True, если найдено пересечение ключевых слов.
+    """
+    if not text or len(text) < 50:
+        return False
+
+    # Разбиваем на слова, убираем короткие (предлоги и т.д.)
+    def get_words(s):
+        return set(w.lower() for w in re.findall(r'\w{4,}', s))
+
+    title_words = get_words(title)
+    text_words = get_words(text)
+
+    if not title_words:
+        return True # Если заголовок слишком короткий, пропускаем проверку
+
+    # Ищем общие слова. Если нет ни одного общего слова >3 букв, это левый текст
+    return bool(title_words.intersection(text_words))
+
 # --- NETWORK / PARSING ---
 
 async def fetch_text_limited(response, max_bytes: int, ctx_url: str = ""):
@@ -571,18 +592,25 @@ async def send_news(session: aiohttp.ClientSession):
         # Скачивание
         article_text = await _limited(extract_article_text(l, ssl_ctx, max_length=PARSER_MAX_TEXT_LENGTH, session=session))
 
-        # Проверка на запрещенные слова
-        if is_blocked_article(t, article_text or ""):
-            await db.add("seen", l)
-            continue
-
-        # Решение: полный текст или заголовок?
-        use_article = article_text and (len(re.findall(r'\w+', article_text)) >= MIN_ARTICLE_WORDS)
-        content = article_text if use_article else t
+        # --- ВАЛИДАЦИЯ И ВЫБОР КОНТЕНТА ---
+        clean_rss_summary = clean_text(summary_raw)
+        is_relevant = validate_content_relevance(t, article_text)
         
-        # Если текста мало и заголовок короткий — скип
-        if not use_article and len(re.findall(r'\w+', t)) < MIN_TITLE_WORDS:
-            logging.info(f"⏭️ Пропуск (мало данных): {l}")
+        if is_relevant and len(re.findall(r'\w+', article_text)) >= MIN_ARTICLE_WORDS:
+            # Текст прошел проверку и он достаточно длинный
+            content = article_text
+        elif clean_rss_summary and len(clean_rss_summary) > 20:
+            # Текст плохой/левый, используем описание из RSS
+            logging.info(f"⚠️ Текст не прошел проверку. Fallback to RSS summary: {l}")
+            content = clean_rss_summary
+        else:
+            # Совсем ничего нет, берем заголовок
+            content = t
+
+
+
+        # Проверка на запрещенные слова
+        if is_blocked_article(t, content):
             await db.add("seen", l)
             continue
 
