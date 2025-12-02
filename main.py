@@ -517,6 +517,7 @@ def sanitize_summary(s: str):
     for g in garbage:
         s = re.sub(g, '', s, flags=re.IGNORECASE | re.MULTILINE).strip()
     if not s: return ""
+    s = re.sub(r'```[\w]*\n?', '', s) # Удаляет ```html, ```xml и закрывающие ```
     s = re.sub(r'(?m)^[\s]*[\*\-\u2013]\s+', '• ', s)
     s = re.sub(r'\*\*([^\n*]+)\*\*', r'<b>\1</b>', s)
     s = re.sub(r'(?<!\*)\*([^\n*]+?)\*(?!\*)', r'<i>\1</i>', s)
