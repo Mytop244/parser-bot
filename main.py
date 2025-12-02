@@ -448,10 +448,10 @@ async def summarize_ollama(text: str):
         async with sess.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=OLLAMA_TIMEOUT) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                return data.get("response", "").strip(), OLLAMA_MODEL
+                return data.get("response", "").strip(), OLLAMA_MODEL, "Local (Ollama)"
     except Exception as e:
         logging.error(f"Ollama error: {e}")
-    return None, None
+    return None, None, None
 
 async def summarize_gemini(text: str, max_tokens: int | None = None):
     text = clean_text(text)
@@ -496,8 +496,9 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
                 data = await resp.json()
                 try:
                     res = data["candidates"][0]["content"]["parts"][0]["text"]
-                    return res.strip(), GEMINI_MODEL
-                except: return None, GEMINI_MODEL
+                    masked_key = f"{key_to_use[:4]}...{key_to_use[-4:]}"
+                    return res.strip(), GEMINI_MODEL, masked_key
+                except: return None, GEMINI_MODEL, None
         except Exception as e:
             logging.warning(f"Gemini error: {e}")
             attempts += 1
@@ -508,21 +509,46 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
 # --- UTILS ---
 
 def sanitize_summary(s: str):
-    # Убираем мусорные вступления
-    garbage = [
-        r'^(?:конечно[,:]?|вот|держи|итак[,:]?)\s*',
-        r'^(?:вот|ниже)?\s*(?:краткое)?\s*резюме[:\.]?\s*',
-        r'^в\s+статье\s+(?:говорится|рассказывается|речь идет)\s+(?:о|том, что)?\s*',
-    ]
-    for g in garbage:
-        s = re.sub(g, '', s, flags=re.IGNORECASE | re.MULTILINE).strip()
     if not s: return ""
-    s = re.sub(r'```[\w]*\n?', '', s) # Удаляет ```html, ```xml и закрывающие ```
+    
+    # 1. Сначала убираем блоки кода (```), чтобы они не мешали парсингу
+    s = re.sub(r'```[\w]*\n?', '', s)
+
+    # 2. Список мусорных фраз (RegEx)
+    garbage = [
+        # Утверждения и приветствия (Конечно, Разумеется, Ок...)
+        r'^(?:конечно|разумеется|безусловно|понял|хорошо|ок|ладно|готово)[,!:.]?\s*',
+        
+        # Вводные конструкции (Вот резюме, Держи саммари, Ниже представлен...)
+        r'^(?:вот|держи|ниже|здесь)?\s*(?:представлен|подготовлен|находится)?\s*(?:ваш[е]?|краткое)?\s*(?:резюме|саммари|содержание|пересказ|итог|обзор|анализ)(?:\s+(?:статьи|текста|новости|материала))?[:\.]?\s*',
+        
+        # Мета-описания (В статье говорится, Текст посвящен, Автор рассказывает...)
+        r'^(?:в|данн(?:ая|ой)|эт(?:а|ой))\s+(?:стать(?:ье|я)|новост(?:ь|и)|публикаци(?:я|и)|материал(?:е)?)\s+(?:рассказывает(?:ся)?|повествует|описывает|сообщает|посвящен[ао]?|содержит|гласит|(?:речь\s+)?идет|обсуждает(?:ся)?)\s+(?:о|про|том,?\s+что)?\s*',
+        r'^(?:автор|источник)\s+(?:рассказывает|сообщает|пишет|отмечает|утверждает)\s+(?:о|что)?\s*',
+        
+        # Заголовки Markdown, которые модель может вставить (## Резюме, **Итог**)
+        r'^[\#\*]+\s*(?:резюме|итог|суть|кратко|вывод|основное)(?:\s+новости)?[\#\*]*[:\.]?\s*',
+    ]
+
+    # 3. Циклическая очистка (снимаем слои мусора один за другим)
+    s = s.strip()
+    while True:
+        original = s
+        for g in garbage:
+            s = re.sub(g, '', s, flags=re.IGNORECASE).strip()
+        # Если после прохода текст не изменился — выходим
+        if s == original:
+            break
+
+    if not s: return ""
+
+    # 4. Форматирование Markdown (списки, жирный, курсив, ссылки)
     s = re.sub(r'(?m)^[\s]*[\*\-\u2013]\s+', '• ', s)
     s = re.sub(r'\*\*([^\n*]+)\*\*', r'<b>\1</b>', s)
     s = re.sub(r'(?<!\*)\*([^\n*]+?)\*(?!\*)', r'<i>\1</i>', s)
     s = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', s)
     s = re.sub(r'\[([^\]]+?)\]\((https?://[^\s)]+)\)', r'<a href="\2">\1</a>', s)
+
     return s.strip()
 
 def split_html_preserve(text: str, limit: int = HTML_SAFE_LIMIT - 200):
@@ -633,9 +659,9 @@ async def send_news(session: aiohttp.ClientSession):
         active_lower = (ACTIVE_MODEL or "").lower()
         
         if "gemini" in active_lower:
-            summ_text, used_model = await summarize_gemini(content)
+            summ_text, used_model, key_info = await summarize_gemini(content)
         else:
-            summ_text, used_model = await summarize_ollama(content)
+            summ_text, used_model, key_info = await summarize_ollama(content)
 
         # Обработка паузы/ошибки модели
         if used_model == "pause_1h" or (not summ_text and used_model is None):
@@ -661,7 +687,8 @@ async def send_news(session: aiohttp.ClientSession):
             await db.add("sent", l, ts)
             await db.add("seen", l, ts)
             sent_count += 1
-            logging.info(f"📤 Отправлено: {t[:40]}...")
+            blocked_cnt = len([k for k, v in _blocked_keys.items() if v > time.time()])
+            logging.info(f"📤 Отправлено: {t[:30]}... | 🔑 Ключ: {key_info} | ⛔ Blocked: {blocked_cnt}")
             
         except Exception as e:
             logging.error(f"❌ Ошибка отправки: {e}")
