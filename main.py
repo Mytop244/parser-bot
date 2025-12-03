@@ -463,7 +463,7 @@ async def summarize_gemini(text: str, max_tokens: int | None = None):
     eff_max = max_tokens or GEMINI_MAX_TOKENS
         
     # Системная инструкция для подавления "болтливости" модели
-    sys_instr = "Ты — API для генерации JSON/HTML. Твоя единственная задача — вернуть текст резюме. ЗАПРЕЩЕНО: вступления, приветствия, фразы 'Вот резюме', 'В статье'. Начинай сразу с первого предложения новости."
+    sys_instr = "Ты — API. Твоя задача: 1 строка - Кликбейтный заголовок. 2 строка и далее - Текст резюме. Не пиши вступлений типа 'Вот заголовок'."
 
     payload = {
         "system_instruction": {"parts": [{"text": sys_instr}]},
@@ -670,9 +670,21 @@ async def send_news(session: aiohttp.ClientSession):
             break # Прерываем батч
 
         # Формирование сообщения
+        final_summary = summ_text or ""
+        display_title = t
+        
+        # Пытаемся отделить заголовок от тела (по первому переносу строки)
+        if final_summary and "\n" in final_summary:
+            parts = final_summary.split("\n", 1)
+            # Если первая строка похожа на заголовок (не слишком длинная)
+            if len(parts[0]) < 200:
+                display_title = parts[0].strip()
+                final_summary = parts[1].strip()
+
         local_time_str = (p or datetime.now(APP_TZ)).astimezone(APP_TZ).strftime("%d.%m.%Y, %H:%M")
-        msg = (HEADER_TEMPLATE.format(title=html.escape(t.strip()), source=s, date=local_time_str) +
-               BODY_PREFIX + sanitize_summary(summ_text or "") +
+        
+        msg = (HEADER_TEMPLATE.format(title=html.escape(display_title.strip()), source=s, date=local_time_str) +
+               BODY_PREFIX + sanitize_summary(final_summary) +
                FOOTER_TEMPLATE.format(model=used_model, link=html.escape(l, quote=True)))
 
         # Отправка
