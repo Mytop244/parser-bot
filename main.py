@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import aiohttp, feedparser
 import random
 import atexit
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut, NetworkError
@@ -282,7 +283,9 @@ def split_text_safe(text: str, limit: int = HTML_SAFE_LIMIT) -> list[str]:
     return parts
 
 def clean_text(text: str) -> str:
+    if not text: return ""
     try:
+        text = html.unescape(text)  # Декодируем &quot; -> " и &amp; -> &
         if "<" in text and ">" in text:
             text = BeautifulSoup(text, "html.parser").get_text()
     except Exception: pass
@@ -336,6 +339,19 @@ def validate_content_relevance(title: str, text: str) -> bool:
 
     # Ищем общие слова. Если нет ни одного общего слова >3 букв, это левый текст
     return bool(title_words.intersection(text_words))
+def normalize_url(url: str) -> str:
+    """Удаляет UTM-метки и слеши для проверки уникальности."""
+    if not url: return ""
+    try:
+        u = urlparse(url)
+        query = parse_qsl(u.query)
+        # Оставляем только параметры, не влияющие на контент
+        clean_query = [(k, v) for k, v in query if not k.startswith(('utm_', 'fbclid', 'gclid', 'yclid', 'from'))]
+        sorted_query = urlencode(sorted(clean_query))
+        path = u.path.rstrip('/') if len(u.path) > 1 else u.path
+        return urlunparse((u.scheme, u.netloc, path, u.params, sorted_query, u.fragment))
+    except: return url.strip()
+
 
 # --- NETWORK / PARSING ---
 
@@ -389,7 +405,7 @@ async def fetch_and_check(session, url):
                 
             summary = e.get("summary", "") or e.get("description", "") or ""
             news.append((
-                e.get("title", "Без заголовка").strip(),
+                clean_text(e.get("title", "Без заголовка")),  # Чистим заголовок сразу
                 e.get("link", "").strip(),
                 feed.feed.get("title", "Неизвестный источник").strip(),
                 summary,
@@ -604,16 +620,27 @@ async def send_news(session: aiohttp.ClientSession):
 
     # 3. Фильтрация и дедупликация через DB
     unique_news = []
+    seen_urls_in_batch = set()
+    
+    # Сортировка по дате (новые сверху) до фильтрации
+    all_news.sort(key=lambda x: x[4] or datetime.min.replace(tzinfo=APP_TZ), reverse=True)
+
     for item in all_news:
         link = item[1]
         # Проверяем в БД: была ли отправлена или просмотрена
-        if await db.exists("sent", link) or await db.exists("seen", link):
-            continue
+        clean_link = normalize_url(link)
+        
+        # Проверка 1: нет ли уже в этом батче (защита от дублей RSS + JSON)
+        if clean_link in seen_urls_in_batch: continue
+        
+        # Проверка 2: БД (по чистой ссылке и по оригиналу)
+        if await db.exists("sent", clean_link) or await db.exists("seen", clean_link): continue
+        if clean_link != link and (await db.exists("sent", link) or await db.exists("seen", link)): continue
+
+        seen_urls_in_batch.add(clean_link)
         unique_news.append(item)
     
-    # Сортировка по дате (новые сверху)
-    unique_news.sort(key=lambda x: x[4] or datetime.min.replace(tzinfo=APP_TZ), reverse=True)
-    
+
     current_batch = unique_news[:NEWS_LIMIT]
     queue_rest = unique_news[NEWS_LIMIT:]
     sent_count = 0
@@ -625,7 +652,9 @@ async def send_news(session: aiohttp.ClientSession):
         else: t, l, s, p = item; summary_raw = ""
 
         # Финальная проверка перед отправкой (на случай гонки)
-        if await db.exists("sent", l): continue
+        norm_link = normalize_url(l)
+        if await db.exists("sent", norm_link) or await db.exists("sent", l): 
+            continue
 
         logging.info(f"⚙️ Обработка: {t}")
         
@@ -678,7 +707,8 @@ async def send_news(session: aiohttp.ClientSession):
             parts = final_summary.split("\n", 1)
             # Если первая строка похожа на заголовок (не слишком длинная)
             if len(parts[0]) < 200:
-                display_title = parts[0].strip()
+                # Чистим заголовок от Markdown модели (**Title**) и HTML
+                display_title = clean_text(parts[0].replace('*', '').strip())
                 final_summary = parts[1].strip()
 
         local_time_str = (p or datetime.now(APP_TZ)).astimezone(APP_TZ).strftime("%d.%m.%Y, %H:%M")
@@ -698,6 +728,11 @@ async def send_news(session: aiohttp.ClientSession):
             ts = int(time.time())
             await db.add("sent", l, ts)
             await db.add("seen", l, ts)
+                        # Сохраняем также нормализованную версию, чтобы избежать дублей в будущем
+            if norm_link != l:
+                await db.add("sent", norm_link, ts)
+                await db.add("seen", norm_link, ts)
+
             sent_count += 1
             blocked_cnt = len([k for k, v in _blocked_keys.items() if v > time.time()])
             logging.info(f"📤 Отправлено: {t[:30]}... | 🔑 Ключ: {key_info} | ⛔ Blocked: {blocked_cnt}")
