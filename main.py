@@ -340,16 +340,19 @@ def validate_content_relevance(title: str, text: str) -> bool:
     # Ищем общие слова. Если нет ни одного общего слова >3 букв, это левый текст
     return bool(title_words.intersection(text_words))
 def normalize_url(url: str) -> str:
-    """Удаляет UTM-метки и слеши для проверки уникальности."""
+    """Удаляет UTM-метки, слеши, www и приводит к единому протоколу."""
     if not url: return ""
     try:
         u = urlparse(url)
         query = parse_qsl(u.query)
         # Оставляем только параметры, не влияющие на контент
-        clean_query = [(k, v) for k, v in query if not k.startswith(('utm_', 'fbclid', 'gclid', 'yclid', 'from'))]
+        clean_query = [(k, v) for k, v in query if not k.startswith(('utm_', 'fbclid', 'gclid', 'yclid', 'from', 'ref'))]
         sorted_query = urlencode(sorted(clean_query))
         path = u.path.rstrip('/') if len(u.path) > 1 else u.path
-        return urlunparse((u.scheme, u.netloc, path, u.params, sorted_query, u.fragment))
+        # Принудительно ставим https и убираем www для надежной дедупликации
+        netloc = u.netloc.lower().replace('www.', '')
+        
+        return urlunparse(('https', netloc, path, u.params, sorted_query, u.fragment))
     except: return url.strip()
 
 
@@ -621,23 +624,29 @@ async def send_news(session: aiohttp.ClientSession):
     # 3. Фильтрация и дедупликация через DB
     unique_news = []
     seen_urls_in_batch = set()
+    seen_titles_in_batch = set()
     
     # Сортировка по дате (новые сверху) до фильтрации
     all_news.sort(key=lambda x: x[4] or datetime.min.replace(tzinfo=APP_TZ), reverse=True)
 
     for item in all_news:
+        title = item[0]
         link = item[1]
-        # Проверяем в БД: была ли отправлена или просмотрена
+                
+        # Нормализация
         clean_link = normalize_url(link)
+        clean_title = clean_text(title).lower().strip()
         
-        # Проверка 1: нет ли уже в этом батче (защита от дублей RSS + JSON)
+        # Проверка 1: Дубликаты внутри текущего батча (по ссылке ИЛИ по заголовку)
         if clean_link in seen_urls_in_batch: continue
+        if clean_title in seen_titles_in_batch: continue
         
         # Проверка 2: БД (по чистой ссылке и по оригиналу)
         if await db.exists("sent", clean_link) or await db.exists("seen", clean_link): continue
         if clean_link != link and (await db.exists("sent", link) or await db.exists("seen", link)): continue
 
         seen_urls_in_batch.add(clean_link)
+        seen_titles_in_batch.add(clean_title)
         unique_news.append(item)
     
 
