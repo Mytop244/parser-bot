@@ -9,3 +9,4 @@ bleach
 pyinstaller
 customtkinter
 aiosqlite
+trafilatura

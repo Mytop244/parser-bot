@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 from functools import partial
 from dotenv import load_dotenv
 import aiohttp, feedparser
+import trafilatura
 import random
 import atexit
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
@@ -420,34 +421,47 @@ async def fetch_and_check(session, url):
 
 async def extract_article_text(url: str, ssl_context=None, max_length: int = 5000, session: aiohttp.ClientSession | None = None):
     ctx = ssl_context or ssl.create_default_context()
-    headers = {"User-Agent": "Mozilla/5.0 NewsBot/1.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
+    
+    html_text = ""
     try:
         sess = session or await get_session()
         async with sess.get(url, ssl=ctx, headers=headers) as r:
             if r.status != 200: return ""
-            html_text = await fetch_text_limited(r, 500_000, url)
-    except: return ""
+            # Увеличиваем лимит до 2МБ для корректной работы парсера
+            html_text = await fetch_text_limited(r, 2 * 1024 * 1024, url)
+    except Exception as e:
+        logging.warning(f"⚠️ Fetch error {url}: {e}")
+        return ""
 
-    if not html_text.strip(): return ""
+    if not html_text: return ""
     
-    # Simple extraction logic
-    soup = BeautifulSoup(html_text, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer", "form"]):
-        tag.decompose()
+    # Trafilatura (CPU-bound) запускаем в executor
+    try:
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(
+            None,
+            partial(
+                trafilatura.extract,
+                html_text,
+                include_comments=False,
+                include_tables=False,
+                deduplicate=True,
+                target_language="ru"
+            )
+        )
+    except Exception as e:
+        logging.error(f"❌ Trafilatura error: {e}")
+        text = None
+
+    if not text:
+        return ""
+    
+    # Обрезка по длине
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(" ", 1)[0]
         
-    article = soup.find("article") or soup
-    paragraphs = [p.get_text(" ", strip=True) for p in article.find_all("p")]
-    text = " ".join(paragraphs).strip()
-    
-    if len(text.split()) >= 30:
-        return text[:max_length].rsplit(" ", 1)[0]
-    
-    # Fallback: meta description
-    meta = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", property="og:description")
-    if meta and meta.get("content"):
-        return meta["content"][:max_length]
-        
-    return ""
+    return text
 
 # --- MODEL WRAPPERS ---
 
