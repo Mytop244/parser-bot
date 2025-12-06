@@ -1,12 +1,7 @@
+python-dotenv
 aiohttp
 feedparser
-python-telegram-bot
+trafilatura
 beautifulsoup4
-readability-lxml
-trafilatura
-python-dotenv
-bleach
-pyinstaller
-customtkinter
+python-telegram-bot
 aiosqlite
-trafilatura
