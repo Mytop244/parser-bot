@@ -6,6 +6,7 @@ from functools import partial
 from dotenv import load_dotenv
 import aiohttp, feedparser
 import trafilatura
+import hashlib
 import random
 import atexit
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
@@ -64,7 +65,17 @@ SMART_PAUSE_MAX = int(os.getenv("SMART_PAUSE_MAX", "60"))
 STATE_DAYS_LIMIT = int(os.getenv("STATE_DAYS_LIMIT", "7"))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 raw_chat = os.environ.get("CHAT_ID")
-CHAT_ID = int(raw_chat) if raw_chat not in (None, "") else None
+if raw_chat in (None, ""):
+    CHAT_ID = None
+else:
+    try:
+        CHAT_ID = int(raw_chat)
+    except ValueError:
+        raise RuntimeError(
+            "❌ CHAT_ID должен быть целым числом. "
+            f"Текущее значение: {repr(raw_chat)}"
+        )
+
 
 _env_rss = [u.strip() for u in os.environ.get("RSS_URLS", "").split(",") if u.strip()]
 RSS_FILE = fix_path("rss.txt")  # Используем fix_path, как для логов и БД
@@ -169,18 +180,18 @@ class Database:
         try:
             with open(STATE_JSON_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            async with self.conn.cursor() as cur:
-                for kind in ["seen", "sent"]:
-                    items = data.get(kind, {})
-                    if isinstance(items, dict):
-                        for url, ts in items.items():
-                            try:
-                                ts_val = int(ts) if isinstance(ts, (int, float)) else int(time.time())
-                            except: ts_val = int(time.time())
-                            await cur.execute(
-                                "INSERT OR IGNORE INTO history (url, kind, timestamp) VALUES (?, ?, ?)", 
-                                (url, kind, ts_val)
-                            )
+            for kind in ["seen", "sent"]:
+                items = data.get(kind, {})
+                if isinstance(items, dict):
+                    for url, ts in items.items():
+                        try:
+                            ts_val = int(ts) if isinstance(ts, (int, float)) else int(time.time())
+                        except Exception:
+                            ts_val = int(time.time())
+                        await self.conn.execute(
+                            "INSERT OR IGNORE INTO history (url, kind, timestamp) VALUES (?, ?, ?)",
+                            (url, kind, ts_val)
+                        )
             await self.conn.commit()
             backup_name = STATE_JSON_PATH + ".bak"
             shutil.move(STATE_JSON_PATH, backup_name)
@@ -274,13 +285,18 @@ _cache = {}
 
 def split_text_safe(text: str, limit: int = HTML_SAFE_LIMIT) -> list[str]:
     parts = []
+    if not text:
+        return parts
     while len(text) > limit:
         pos = text.rfind("\n", 0, limit)
-        if pos == -1: pos = text.rfind(" ", 0, limit)
-        if pos == -1: pos = limit
+        if pos == -1:
+            pos = text.rfind(" ", 0, limit)
+        if pos == -1 or pos <= 0:
+            pos = limit
         parts.append(text[:pos].strip())
         text = text[pos:].strip()
-    if text: parts.append(text)
+    if text:
+        parts.append(text)
     return parts
 
 def clean_text(text: str) -> str:
@@ -293,18 +309,55 @@ def clean_text(text: str) -> str:
     return " ".join(text.split())
 
 def parse_iso_utc(s):
-    if isinstance(s, datetime): return s.astimezone(APP_TZ)
-    if not s: raise ValueError("empty date")
+    """
+    Принимает datetime или строку. Возвращает datetime с tz=APP_TZ.
+    Поддерживает ISO, 'Z' и несколько пользовательских форматов.
+    """
+    if isinstance(s, datetime):
+        dt = s
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=APP_TZ)
+        return dt.astimezone(APP_TZ)
+
+    if not s:
+        raise ValueError("empty date")
+
     s = s.strip()
-    if s.endswith("Z"): s = s[:-1] + "+00:00"
-    try: dt = datetime.fromisoformat(s)
-    except:
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
         dt = None
-        for fmt in ("%d.%m.%Y, %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z"):
-            try: dt = datetime.strptime(s, fmt); break
-            except ValueError: continue
-        if dt is None: raise ValueError(f"Invalid date: {s}")
-    return dt.astimezone(APP_TZ) if dt.tzinfo else dt.replace(tzinfo=APP_TZ)
+        for fmt in (
+            "%d.%m.%Y, %H:%M",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S"
+        ):
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            raise ValueError(f"Invalid date: {s}")
+
+    if dt.tzinfo:
+        return dt.astimezone(APP_TZ)
+    return dt.replace(tzinfo=APP_TZ)
+
+
+def title_fingerprint(title: str) -> str:
+    """Нормализует заголовок и возвращает короткий sha256-hex отпечаток."""
+    if not title:
+        return ""
+    norm = re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', ' ', title.lower())).strip()
+    if not norm:
+        return ""
+    h = hashlib.sha256(norm.encode("utf-8")).hexdigest()
+    return "TITLEFP:" + h[:40]
 
 def is_blocked_article(title: str, text: str, blocked_words: list | None = None) -> bool:
     bw = blocked_words if blocked_words is not None else BLOCKED_WORDS
@@ -612,6 +665,12 @@ async def send_with_retry(chat_id, text):
 async def send_news(session: aiohttp.ClientSession):
     # 1. Загрузка очереди (из файла, для совместимости/повторов)
     all_news = []
+    # --- Статистика текущего цикла ---
+    stats = {
+        "found": 0, "batch_unique": 0, "sent": 0,
+        "dup_batch_url": 0, "dup_batch_title": 0,
+        "dup_db_url": 0, "dup_db_title": 0, "blocked": 0, "irrelevant": 0, "fallback_rss": 0
+    }
     if os.path.exists("news_queue.json"):
         try:
             with open("news_queue.json", "r", encoding="utf-8") as f:
@@ -636,6 +695,7 @@ async def send_news(session: aiohttp.ClientSession):
     if not all_news: return
 
     # 3. Фильтрация и дедупликация через DB
+    stats["found"] = len(all_news)
     unique_news = []
     seen_urls_in_batch = set()
     seen_titles_in_batch = set()
@@ -652,17 +712,30 @@ async def send_news(session: aiohttp.ClientSession):
         clean_title = clean_text(title).lower().strip()
         
         # Проверка 1: Дубликаты внутри текущего батча (по ссылке ИЛИ по заголовку)
-        if clean_link in seen_urls_in_batch: continue
-        if clean_title in seen_titles_in_batch: continue
+        if clean_link in seen_urls_in_batch:
+            stats["dup_batch_url"] += 1
+            logging.info(f"🔁 Дубликат URL в батче → {clean_link}")
+            continue
+        if clean_title in seen_titles_in_batch:
+            stats["dup_batch_title"] += 1
+            logging.info(f"🔁 Дубликат заголовка в батче → {clean_title}")
+            continue
         
         # Проверка 2: БД (по чистой ссылке и по оригиналу)
-        if await db.exists("sent", clean_link) or await db.exists("seen", clean_link): continue
-        if clean_link != link and (await db.exists("sent", link) or await db.exists("seen", link)): continue
+        if await db.exists("sent", clean_link) or await db.exists("seen", clean_link):
+            stats["dup_db_url"] += 1
+            logging.info(f"📚 Дубликат в БД (нормализованный URL) → {clean_link}")
+            continue
 
+        if clean_link != link and (await db.exists("sent", link) or await db.exists("seen", link)):
+            stats["dup_db_url"] += 1
+            logging.info(f"📚 Дубликат в БД (оригинальный URL) → {link}")
+            continue
         seen_urls_in_batch.add(clean_link)
         seen_titles_in_batch.add(clean_title)
         unique_news.append(item)
     
+    stats["batch_unique"] = len(unique_news)  
 
     current_batch = unique_news[:NEWS_LIMIT]
     queue_rest = unique_news[NEWS_LIMIT:]
@@ -675,9 +748,21 @@ async def send_news(session: aiohttp.ClientSession):
         else: t, l, s, p = item; summary_raw = ""
 
         # Финальная проверка перед отправкой (на случай гонки)
+        # Финальная проверка перед отправкой (на случай гонки)
         norm_link = normalize_url(l)
-        if await db.exists("sent", norm_link) or await db.exists("sent", l): 
+        if await db.exists("sent", norm_link) or await db.exists("sent", l):
             continue
+
+        # --- Проверка по отпечатку заголовка ---
+        fp = title_fingerprint(clean_text(t))
+        if fp:
+            if await db.exists("sent", fp) or await db.exists("seen", fp):
+                stats["dup_db_title"] += 1
+                logging.info(f"🔁 Пропущено: дубликат заголовка → {t}")
+                await db.add("seen", l)
+                stats["blocked"] += 1
+                logging.info(f"🚫 Заблокировано по слову: {t}")      
+                continue
 
         logging.info(f"⚙️ Обработка: {t}")
         
@@ -691,6 +776,7 @@ async def send_news(session: aiohttp.ClientSession):
         if is_relevant and len(re.findall(r'\w+', article_text)) >= MIN_ARTICLE_WORDS:
             # Текст прошел проверку и он достаточно длинный
             content = article_text
+            logging.info(f"📄 Статья релевантна → {l}")
         elif clean_rss_summary and len(clean_rss_summary) > 20:
             # Текст плохой/левый, используем описание из RSS
             logging.info(f"⚠️ Текст не прошел проверку. Fallback to RSS summary: {l}")
@@ -698,7 +784,8 @@ async def send_news(session: aiohttp.ClientSession):
         else:
             # Совсем ничего нет, берем заголовок
             content = t
-
+            stats["irrelevant"] += 1
+            logging.info(f"⚠️ Статья нерелевантна или пустая → {l}")
 
 
         # Проверка на запрещенные слова
@@ -751,6 +838,11 @@ async def send_news(session: aiohttp.ClientSession):
             ts = int(time.time())
             await db.add("sent", l, ts)
             await db.add("seen", l, ts)
+
+            # --- Сохраняем отпечаток заголовка ---
+            if fp:
+                await db.add("sent", fp, ts)
+                await db.add("seen", fp, ts)
                         # Сохраняем также нормализованную версию, чтобы избежать дублей в будущем
             if norm_link != l:
                 await db.add("sent", norm_link, ts)
@@ -759,7 +851,9 @@ async def send_news(session: aiohttp.ClientSession):
             sent_count += 1
             blocked_cnt = len([k for k, v in _blocked_keys.items() if v > time.time()])
             logging.info(f"📤 Отправлено: {t[:30]}... | 🔑 Ключ: {key_info} | ⛔ Blocked: {blocked_cnt}")
-            
+
+            # Статистика
+            stats["sent"] += 1
         except Exception as e:
             logging.error(f"❌ Ошибка отправки: {e}")
 
@@ -785,6 +879,19 @@ async def send_news(session: aiohttp.ClientSession):
         wait = base + random.uniform(-2, 2)
         logging.info(f"💤 Smart Pause: {wait:.1f}s")
         await asyncio.sleep(wait)
+    # --- Финальная расширенная статистика ---
+    logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    logging.info("📊 Итог цикла:")
+    logging.info(f"🔎 Найдено статей: {stats['found']}")
+    logging.info(f"✨ Уникальных в батче: {stats['batch_unique']}")
+    logging.info(f"📤 Отправлено: {stats['sent']}")
+    logging.info(f"🔁 Дублей в батче (URL): {stats['dup_batch_url']}")
+    logging.info(f"🔁 Дублей в батче (title): {stats['dup_batch_title']}")
+    logging.info(f"📚 Дублей в БД (URL): {stats['dup_db_url']}")
+    logging.info(f"📚 Дублей в БД (title-fp): {stats['dup_db_title']}")
+    logging.info(f"🚫 Заблокировано словом: {stats['blocked']}")
+    logging.info(f"⚠️ Нерелевантных/пустых: {stats['irrelevant']}")
+    logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 async def check_sources():
     session = await get_session()
