@@ -25,6 +25,20 @@ BASE_DIR = os.path.dirname(
     sys.executable if getattr(sys, 'frozen', False) else __file__
 )
 
+# --- ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА (SINGLETON) ---
+try:
+    import fcntl
+    # Создаем файл блокировки рядом с main.py
+    _lock_file = open(os.path.join(BASE_DIR, "bot.lock"), "w")
+    try:
+        # Пытаемся захватить эксклюзивный доступ. Если занято — вылетает ошибка.
+        fcntl.lockf(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        sys.exit("❌ ОШИБКА: Бот уже запущен в другой сессии! Остановите старый процесс.")
+except ImportError:
+    pass # На Windows fcntl нет, игнорируем
+
+
 def fix_path(name: str) -> str:
     return os.path.join(BASE_DIR, name)
 
