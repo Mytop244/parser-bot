@@ -832,6 +832,23 @@ async def send_news(session: aiohttp.ClientSession):
         msg = (HEADER_TEMPLATE.format(title=html.escape(display_title.strip()), source=s, date=local_time_str) +
                BODY_PREFIX + sanitize_summary(final_summary) +
                FOOTER_TEMPLATE.format(model=used_model, link=html.escape(l, quote=True)))
+        # =====================================================================
+        # 🔥 ПОСЛЕДНЯЯ ПРОВЕРКА ПЕРЕД ПУБЛИКАЦИЕЙ (ULTIMATE PRE-SEND CHECK) 🔥
+        # =====================================================================
+        # Проверяем, не была ли новость опубликована, пока мы ждали ответ от ИИ.
+        # Это защищает от состояния гонки (race condition).
+        
+        # l - это оригинальная ссылка из текущей итерации цикла
+        final_norm_link = normalize_url(l)
+
+        # Если ссылка уже есть в базе со статусом "sent" (отправлено)
+        if await db.exists("sent", l) or await db.exists("sent", final_norm_link):
+            logging.warning(f"🛑 Race condition prevented! URL already published while processing: {l}")
+            # Увеличиваем счетчик дублей для статистики
+            stats["dup_db_url"] += 1
+            # Пропускаем отправку и переходим к следующей новости в цикле
+            continue
+        # =====================================================================
 
         # Отправка
         parts = split_html_preserve(msg)
