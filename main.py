@@ -699,7 +699,10 @@ async def send_news(session: aiohttp.ClientSession):
     unique_news = []
     seen_urls_in_batch = set()
     seen_titles_in_batch = set()
-    
+
+    # ---- NEW: списки для агрегации дублей ----
+    dup_batch_url_samples = []
+    dup_batch_title_samples = []    
     # Сортировка по дате (новые сверху) до фильтрации
     all_news.sort(key=lambda x: x[4] or datetime.min.replace(tzinfo=APP_TZ), reverse=True)
 
@@ -714,11 +717,14 @@ async def send_news(session: aiohttp.ClientSession):
         # Проверка 1: Дубликаты внутри текущего батча (по ссылке ИЛИ по заголовку)
         if clean_link in seen_urls_in_batch:
             stats["dup_batch_url"] += 1
-            logging.info(f"🔁 Дубликат URL в батче → {clean_link}")
+            # накапливаем только первые 5 примеров
+            if len(dup_batch_url_samples) < 5:
+                dup_batch_url_samples.append(clean_link)
             continue
         if clean_title in seen_titles_in_batch:
             stats["dup_batch_title"] += 1
-            logging.info(f"🔁 Дубликат заголовка в батче → {clean_title}")
+            if len(dup_batch_title_samples) < 5:
+                dup_batch_title_samples.append(clean_title)
             continue
         
         # Проверка 2: БД (по чистой ссылке и по оригиналу)
@@ -891,6 +897,24 @@ async def send_news(session: aiohttp.ClientSession):
     logging.info(f"📚 Дублей в БД (title-fp): {stats['dup_db_title']}")
     logging.info(f"🚫 Заблокировано словом: {stats['blocked']}")
     logging.info(f"⚠️ Нерелевантных/пустых: {stats['irrelevant']}")
+
+    # --- NEW: агрегированное логирование дублей ---
+    if stats["dup_batch_url"] > 0:
+        logging.info("🔁 Дубликаты URL в батче:")
+        logging.info(f"    Всего: {stats['dup_batch_url']}")
+        if dup_batch_url_samples:
+            logging.info("    Примеры:")
+            for u in dup_batch_url_samples:
+                logging.info(f"       • {u}")
+
+    if stats["dup_batch_title"] > 0:
+        logging.info("🔁 Дубликаты заголовков в батче:")
+        logging.info(f"    Всего: {stats['dup_batch_title']}")
+        if dup_batch_title_samples:
+            logging.info("    Примеры:")
+            for t in dup_batch_title_samples:
+                logging.info(f"       • {t}")
+
     logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 async def check_sources():
