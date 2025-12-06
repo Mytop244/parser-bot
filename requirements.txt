@@ -1,7 +1,9 @@
-python-dotenv
 aiohttp
 feedparser
 trafilatura
 beautifulsoup4
 python-telegram-bot
 aiosqlite
+python-dotenv
+lxml_html_clean
+socket

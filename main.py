@@ -1,4 +1,4 @@
-import os, sys, json, time, asyncio, ssl, logging, tempfile, re, html, calendar, shutil
+import os, sys, json, time, asyncio, ssl, logging, tempfile, re, html, calendar, shutil, socket
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
@@ -26,18 +26,15 @@ BASE_DIR = os.path.dirname(
 )
 
 # --- ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА (SINGLETON) ---
+# Используем Socket Lock, так как fcntl на Termux/Android работает нестабильно.
+# Если порт 64001 занят, значит копия бота уже работает.
+LOCK_PORT = 64001
 try:
-    import fcntl
-    # Создаем файл блокировки рядом с main.py
-    _lock_file = open(os.path.join(BASE_DIR, "bot.lock"), "w")
-    try:
-        # Пытаемся захватить эксклюзивный доступ. Если занято — вылетает ошибка.
-        fcntl.lockf(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except IOError:
-        sys.exit("❌ ОШИБКА: Бот уже запущен в другой сессии! Остановите старый процесс.")
-except ImportError:
-    pass # На Windows fcntl нет, игнорируем
-
+    _socket_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _socket_lock.bind(("127.0.0.1", LOCK_PORT))
+    _socket_lock.listen(0)
+except socket.error:
+    sys.exit("❌ ОШИБКА: Бот уже запущен (Порт 64001 занят)! Второй экземпляр остановлен.")
 
 def fix_path(name: str) -> str:
     return os.path.join(BASE_DIR, name)
