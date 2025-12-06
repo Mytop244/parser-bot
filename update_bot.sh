@@ -1,66 +1,87 @@
 #!/bin/bash
 
 # --- НАСТРОЙКИ ---
-GITHUB_RAW_URL="https://raw.githubusercontent.com/Mytop244/parser-bot/refs/heads/main/main.py"
-GITHUB_REQ_URL="https://raw.githubusercontent.com/Mytop244/parser-bot/refs/heads/main/requirements.txt" # Ссылка на requirements
+# Базовая часть URL для удобства (чтобы не менять в 3 местах)
+BASE_URL="https://raw.githubusercontent.com/Mytop244/parser-bot/refs/heads/main"
+
+GITHUB_RAW_URL="${BASE_URL}/main.py"
+GITHUB_REQ_URL="${BASE_URL}/requirements.txt"
+GITHUB_RSS_URL="${BASE_URL}/rss.txt" # Ссылка на файл RSS
 
 SCRIPT_NAME="main.py"
 REQUIREMENTS="requirements.txt"
+RSS_FILE="rss.txt"
 BACKUP_DIR="backups"
-PYTHON_CMD="python" # Или python3, в зависимости от системы
+PYTHON_CMD="python" # В Termux обычно просто python
 
-# Переходим в директорию, где лежит этот скрипт, чтобы пути не сломались
+# Переходим в директорию скрипта
 cd "$(dirname "$0")"
+
+# --- ФУНКЦИЯ ДЛЯ БЕЗОПАСНОГО ОБНОВЛЕНИЯ ---
+update_file() {
+    local url=$1
+    local filename=$2
+    local description=$3
+    
+    echo "⬇️ Скачивание $description ($filename)..."
+    curl -s -L "$url" -o "${filename}.new"
+
+    # Проверка: файл не пустой и не содержит HTML тега (ошибка 404)
+    if [ -s "${filename}.new" ] && ! grep -q "<html" "${filename}.new"; then
+        # Бэкап, если файл уже существует
+        if [ -f "$filename" ]; then
+            mkdir -p "$BACKUP_DIR"
+            TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+            cp "$filename" "$BACKUP_DIR/${filename}_$TIMESTAMP.bak"
+        fi
+        
+        mv "${filename}.new" "$filename"
+        echo "✅ $description обновлен."
+        return 0 # Успех
+    else
+        echo "⚠️ Не удалось обновить $description (ошибка загрузки или файл не изменился)."
+        rm -f "${filename}.new"
+        return 1 # Ошибка
+    fi
+}
 
 # --- ЛОГИКА ---
 
-echo "🔄 Проверка обновлений..."
+echo "🔄 Начинаем обновление..."
 
-# 1. Скачиваем новый файл
-curl -s -L "$GITHUB_RAW_URL" -o "${SCRIPT_NAME}.new"
+# 1. Обновляем requirements.txt
+update_file "$GITHUB_REQ_URL" "$REQUIREMENTS" "Файл зависимостей"
 
-# 2. Проверяем валидность (размер > 0 и отсутствие HTML тегов ошибки 404)
-# grep ищет "<html", чтобы убедиться, что GitHub не вернул страницу ошибки вместо кода
-if [ -s "${SCRIPT_NAME}.new" ] && ! grep -q "<html" "${SCRIPT_NAME}.new"; then
-    echo "✅ Загрузка завершена."
+# 2. Обновляем rss.txt
+update_file "$GITHUB_RSS_URL" "$RSS_FILE" "Список RSS"
 
-    mkdir -p "$BACKUP_DIR"
-
-    # 3. Бэкап
-    if [ -f "$SCRIPT_NAME" ]; then
-        TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-        cp "$SCRIPT_NAME" "$BACKUP_DIR/${SCRIPT_NAME}_$TIMESTAMP.bak"
-        echo "📦 Бэкап сохранен: $BACKUP_DIR/${SCRIPT_NAME}_$TIMESTAMP.bak"
-    fi
-
-    # 4. Замена файла
-    mv "${SCRIPT_NAME}.new" "$SCRIPT_NAME"
-    echo "📄 Основной файл обновлен."
-
-    # 4.1 Проверка зависимостей (раскомментируйте, если нужно авто-обновление библиотек)
-    # echo "📦 Проверка requirements.txt..."
-    # curl -s -L "$GITHUB_REQ_URL" -o "${REQUIREMENTS}.new"
-    # if [ -s "${REQUIREMENTS}.new" ]; then
-    #     mv "${REQUIREMENTS}.new" "$REQUIREMENTS"
-    #     pip install -r "$REQUIREMENTS" | grep -v 'Requirement already satisfied'
-    # fi
-
-    # 5. Перезапуск
-    echo "🛑 Остановка бота..."
-    pkill -f "$PYTHON_CMD $SCRIPT_NAME"
-    
-    sleep 2
-
-    echo "🚀 Запуск новой версии..."
-    nohup $PYTHON_CMD "$SCRIPT_NAME" > bot_output.log 2>&1 &
-    
-    # Сохраняем PID нового процесса (полезно для отладки)
-    echo $! > bot.pid
-    
-    echo "✅ Готово! Бот запущен (PID: $(cat bot.pid))."
-    echo "📝 Логи: tail -f bot_output.log"
-
+# 3. Обновляем основной скрипт бота
+if update_file "$GITHUB_RAW_URL" "$SCRIPT_NAME" "Скрипт бота"; then
+    MAIN_UPDATED=true
 else
-    echo "❌ Ошибка: Файл пуст или ссылка неверна (возможно 404)."
-    rm -f "${SCRIPT_NAME}.new"
+    MAIN_UPDATED=false
 fi
+
+# 4. Установка зависимостей (специально для Termux и Linux)
+if [ -f "$REQUIREMENTS" ]; then
+    echo "📦 Проверка и установка библиотек из $REQUIREMENTS..."
+    # Флаг --upgrade позволяет обновить библиотеки, если версии изменились
+    pip install -r "$REQUIREMENTS" --upgrade
+    echo "✅ Библиотеки проверены."
+fi
+
+# 5. Перезапуск
+# Перезапускаем только если обновился main.py или если мы просто хотим перезагрузить процесс
+echo "🛑 Остановка текущего бота..."
+pkill -f "$PYTHON_CMD $SCRIPT_NAME"
+
+sleep 2
+
+echo "🚀 Запуск бота..."
+nohup $PYTHON_CMD "$SCRIPT_NAME" > bot_output.log 2>&1 &
+
+# Сохраняем PID
+echo $! > bot.pid
+
+echo "✅ Все готово! Бот запущен (PID: $(cat bot.pid))."
+echo "📝 Следить за логами: tail -f bot_output.log"
