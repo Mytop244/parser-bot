@@ -1,0 +1,66 @@
+# ==== TELEGRAM ====
+TELEGRAM_TOKEN=
+CHAT_ID=
+
+# ==== RSS ====
+# Несколько через запятую или в файле rss.txt
+RSS_URLS=https://example.com/rss,https://example2.com/rss
+
+# ==== ОСНОВНОЕ ПОВЕДЕНИЕ ====
+NEWS_LIMIT=1
+INTERVAL=60
+DAYS_LIMIT=1
+ROUND_ROBIN_MODE=1
+
+# ==== ВЫЧИСЛИТЕЛЬНЫЕ НАСТРОЙКИ ====
+CONCURRENCY=10
+SSL_VERIFY=1
+STATE_DAYS_LIMIT=7
+TIMEZONE=Europe/Moscow
+
+# ==== ПАРСИНГ ====
+PARSER_MAX_TEXT_LENGTH=10000
+MIN_ARTICLE_WORDS=50
+MIN_TITLE_WORDS=5
+MIN_TITLE_MATCHES=3
+
+# ==== LLM (Gemini / Ollama) ====
+ACTIVE_MODEL=gemini-2.5-flash
+GEMINI_KEYS=key1,key2,key3
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MAX_TOKENS=500
+MODEL_MAX_TOKENS=1200
+MODEL_TIMEOUT=120
+GEMINI_BLOCK_MINUTES=10
+
+OLLAMA_MODEL=gpt-oss:20b
+OLLAMA_MODEL_FALLBACK=gpt-oss:120b
+OLLAMA_MAX_TOKENS=500
+OLLAMA_TIMEOUT=180
+
+# ==== ПРОМПТЫ ====
+GEMINI_PROMPT=Сделай профессиональное краткое резюме новости на русском языке, без вступления, дели на абзацы:\n{content}
+OLLAMA_PROMPT=Не делай вступлений. Сделай резюме новости на русском языке:\n{content}
+
+# ==== ФИЛЬТРАЦИЯ ====
+BLOCKED_WORDS=
+
+# ==== ПАУЗЫ И ТАЙМИНГ ====
+SMART_PAUSE=0
+SMART_PAUSE_MIN=30
+SMART_PAUSE_MAX=60
+
+BATCH_SIZE_SMALL=5
+PAUSE_SMALL=3
+BATCH_SIZE_MEDIUM=15
+PAUSE_MEDIUM=5
+BATCH_SIZE_LARGE=25
+PAUSE_LARGE=10
+SINGLE_MESSAGE_PAUSE=1
+
+# ==== ФОРМАТИРОВАНИЕ ====
+HEADER_TEMPLATE=<b>{title}</b>\n📡 <i>{source}</i> | 🗓 {date}\n━━━━━━━━━━━━━━━\n
+BODY_PREFIX=💬 
+FOOTER_TEMPLATE=\n━━━━━━━━━━━━━━━\n🤖 <i>Модель: {model}</i>\n🔗 <a href="{link}">Читать статью</a>
+
+HTML_SAFE_LIMIT=4096
