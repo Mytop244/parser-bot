@@ -104,7 +104,7 @@ DAYS_LIMIT = int(os.environ.get("DAYS_LIMIT", 1))
 ROUND_ROBIN_MODE = int(os.environ.get("ROUND_ROBIN_MODE", 1))
 
 GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()]
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_MODEL_FALLBACK = os.environ.get("OLLAMA_MODEL_FALLBACK", "gpt-oss:120b")
 PARSER_MAX_TEXT_LENGTH = int(os.environ.get("PARSER_MAX_TEXT_LENGTH", "10000"))
@@ -510,8 +510,7 @@ async def extract_article_text(url: str, ssl_context=None, max_length: int = 500
                 html_text,
                 include_comments=False,
                 include_tables=False,
-                deduplicate=True,
-                target_language="ru"
+                deduplicate=True
             )
         )
     except Exception as e:
