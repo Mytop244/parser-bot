@@ -537,7 +537,16 @@ def _block_key_temporarily(key: str):
 
 async def summarize_ollama(text: str):
     prompt = OLLAMA_PROMPT.format(content=text[:PARSER_MAX_TEXT_LENGTH])
-    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"num_predict": MODEL_MAX_TOKENS}}
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "num_predict": MODEL_MAX_TOKENS,
+            "temperature": 0.1,  # Делает ответы строгими и предсказуемыми (low reasoning)
+            "top_p": 0.9         # Убирает маловероятные варианты токенов
+        }
+    }
     
     try:
         sess = await get_session()
@@ -958,7 +967,7 @@ async def main():
     last_check = datetime.now(APP_TZ)
     
     # Настройка таймаута сессии
-    if "ollama" in (ACTIVE_MODEL or "").lower():
+    if "ollama" in (ACTIVE_MODEL or "").lower() or "gpt-oss" in (ACTIVE_MODEL or "").lower():
         t_out = aiohttp.ClientTimeout(total=None)
         base_timeout = None
     else:
